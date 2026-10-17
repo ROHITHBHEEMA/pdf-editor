@@ -40,7 +40,7 @@ class CorpusTest {
             val bytes = f.readBytes()
             open(bytes).use { s ->
                 val before = runs(bytes)
-                val after = runs(s.renderedBytes())
+                val after = runs(ByteArrayOutputStream().also { s.save(it) }.toByteArray())
                 assertEquals("${f.name}: run count", before.size, after.size)
                 before.zip(after).forEachIndexed { i, (a, b) ->
                     assertEquals("${f.name} run $i text", a.text, b.text)

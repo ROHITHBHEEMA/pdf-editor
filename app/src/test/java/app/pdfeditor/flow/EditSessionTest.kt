@@ -461,4 +461,42 @@ class EditSessionTest {
         assertTrue(s.apply(EditParagraph(id, "Zebra")) is EditOutcome.NeedsConfirmation)
         assertFalse(s.isModified)
     }
+
+    // ---- final fix 6: no repeated work per edit ----
+
+    @Test fun unmodifiedSessionDisplaysOriginalBytes() {
+        assertTrue(s.renderedBytes().contentEquals(bytes))
+        s.apply(EditParagraph(idOf("Dear Mr. Sharma,"), "Dear Ms. Sharma,"))
+        assertFalse(s.renderedBytes().contentEquals(bytes))
+        s.undo()
+        assertTrue(s.renderedBytes().contentEquals(bytes))
+        assertEquals(1, String(saved(), Charsets.ISO_8859_1).split("%%EOF").size - 1) // save is still a full rewrite
+    }
+
+    @Test fun observedEncodingsBuiltOncePerSession() {
+        s.pageCount // opens the session
+        val before = ObservedEncodings.buildCount.get()
+        s.apply(EditParagraph(idOf("Date: 17 Octobr 2026"), "Date: 17 October 2026")); s.renderedBytes()
+        s.apply(EditParagraph(idOf("Dear Mr. Sharma,"), "Dear Ms. Sharma,")); s.renderedBytes()
+        assertEquals(before, ObservedEncodings.buildCount.get())
+        val t = extractText(s.renderedBytes()); assertTrue(t.contains("October 2026")); assertTrue(t.contains("Ms. Sharma"))
+    }
+
+    @Test fun pageGeometryWithoutReparsing() {
+        bytes = PdfFixtures.rotated()
+        val g = s.pageGeometry()
+        assertEquals(1, g.size); assertEquals(90, g[0].rotation)
+        assertEquals(PDDocument.load(bytes).use { it.getPage(0).cropBox.width }, g[0].width, 0.01f)
+        s.apply(AddBlankPage(1))
+        val g2 = s.pageGeometry()
+        assertEquals(2, g2.size); assertEquals(0, g2[1].rotation)
+        PDDocument.load(s.renderedBytes()).use { doc ->
+            g2.forEachIndexed { i, pg ->
+                val p = doc.getPage(i)
+                assertEquals(p.rotation, pg.rotation); assertEquals(p.cropBox.width, pg.width, 0.01f)
+                assertEquals(p.cropBox.height, pg.height, 0.01f); assertEquals(p.cropBox.lowerLeftX, pg.left, 0.01f)
+                assertEquals(p.cropBox.lowerLeftY, pg.bottom, 0.01f)
+            }
+        }
+    }
 }

@@ -182,15 +182,20 @@ internal object StateRenderer {
         for (pid in st.edits.keys) remove(pid.page, m.byId.getValue(pid).runNodes)
 
         // Render-time plans bound to the output document's fonts (same spans → same decisions).
+        // The session's observed codes, shared with this load's fonts through their object keys.
+        // A direct (unkeyed) font object can't be matched across loads: then this document is scanned once.
         var observedOut: ObservedEncodings? = null
         val plans = HashMap<ParagraphId, FontPlan>()
         fun planFor(par: Paragraph, spans: List<Span>): FontPlan = plans.getOrPut(par.id) {
             val res = orig[par.id.page].resources
+            var unkeyed = false
             val bound = spans.map { s ->
                 val f = try { res?.getFont(COSName.getPDFName(s.style.fontResourceName)) } catch (_: Exception) { null }
+                val key = ObservedEncodings.fontKey(res, s.style.fontResourceName)
+                if (f != null && key != null) m.observed.bind(f, key) else if (f != null) unkeyed = true
                 Span(s.text, s.style.copy().also { it.font = f ?: s.style.font })
             }
-            val obs = observedOut ?: ObservedEncodings.build(out).also { observedOut = it }
+            val obs = if (!unkeyed) m.observed else observedOut ?: ObservedEncodings.build(out).also { observedOut = it }
             when (val r = FontResolver.plan(out, bound, m.provider, obs)) {
                 is FontPlanResult.Ok -> r.plan
                 is FontPlanResult.Unsupported -> error("Font plan changed at render time: ${r.chars}")

@@ -38,9 +38,12 @@ sealed class OpenResult {
     class Failed(val message: String) : OpenResult()
 }
 
+/** An output page's visible box (crop box, page user space) and its rotation in degrees (0/90/180/270). */
+class PageBox(val left: Float, val bottom: Float, val width: Float, val height: Float, val rotation: Int)
+
 /**
- * One open document and its edits. Every state is an immutable [EditState]; display and save both render the
- * current state as a full rewrite of the original bytes (cached per state).
+ * One open document and its edits. Every state is an immutable [EditState]; save renders the current state as a
+ * full rewrite of the original bytes (cached per state), and display uses the same bytes once anything changed.
  */
 class EditSession private constructor(private val m: SessionModel) : Closeable {
 
@@ -77,6 +80,8 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
     private fun flow(): StateFlow = flowCache?.takeIf { it.state == state } ?: StateRenderer.flow(m, state).also { flowCache = it }
 
     val pageCount: Int get() = flow().result.slots.size
+    private val initialState = state
+
     /** State at open or at the last successful save. */
     private var savedState = state
 
@@ -86,8 +91,11 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
     val canUndo: Boolean get() = undoStack.isNotEmpty()
     val canRedo: Boolean get() = redoStack.isNotEmpty()
 
-    /** The current state as a full save; used for display. */
-    fun renderedBytes(): ByteArray {
+    /** The current state for display: the opened bytes as they are while nothing has changed, else a full save. */
+    fun renderedBytes(): ByteArray = if (state == initialState) m.originalBytes else fullSave()
+
+    /** The current state as a full rewrite (cached per state). */
+    private fun fullSave(): ByteArray {
         renderCache?.let { (s, b) -> if (s == state) return b }
         return StateRenderer.render(m, flow()).also { renderCache = state to it }
     }
@@ -95,8 +103,24 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
     /** Full save of the current state; on success it becomes the unmodified baseline. */
     fun save(out: OutputStream) {
         val saving = state
-        out.write(renderedBytes())
+        out.write(fullSave())
         savedState = saving
+    }
+
+    /** Visible box and rotation of each output page of the current state (no re-parse of rendered bytes). */
+    fun pageGeometry(): List<PageBox> {
+        val fl = flow()
+        return fl.result.slots.mapIndexed { o, s ->
+            val orig = (s.slot as? PageSlot.Original)?.index
+            if (orig != null) {
+                val page = m.doc.getPage(orig)
+                val c = page.cropBox
+                PageBox(c.lowerLeftX, c.lowerLeftY, c.width, c.height, ((page.rotation % 360) + 360) % 360)
+            } else {
+                val r = fl.rects[o]
+                PageBox(r.lowerLeftX, r.lowerLeftY, r.width, r.height, 0)
+            }
+        }
     }
 
     fun undo() {

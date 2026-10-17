@@ -50,8 +50,8 @@ class PdfDocumentViewModel : ViewModel() {
     private var fonts: FontCatalog? = null
     private var pendingEdit: EditOp.EditParagraph? = null
 
-    // Display of the current session state: the cache file, pdfium on it, and a pdfbox view of the same bytes
-    // for page geometry and as a render fallback.
+    // Display of the current session state: the cache file, pdfium on it, page geometry from the session, and a
+    // pdfbox view of the same bytes loaded only as a render fallback.
     private var cacheFile: File? = null
     private var pdfRenderer: PdfRenderer? = null
     private var pfd: ParcelFileDescriptor? = null
@@ -320,24 +320,20 @@ class PdfDocumentViewModel : ViewModel() {
         renderMutex.withLock {
             withContext(Dispatchers.IO) {
                 val bytes = s.renderedBytes()
+                val boxes = s.pageGeometry()
                 closeDisplay()
                 geometry = emptyList()
                 file.writeBytes(bytes)
                 val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
                 pfd = fd
                 pdfRenderer = PdfRenderer(fd)
-                val doc = PDDocument.load(file).also { displayDoc = it }
                 val scale = RENDER_DPI / 72f
-                geometry = (0 until doc.numberOfPages).map { i ->
-                    val p = doc.getPage(i)
-                    val crop = p.cropBox
+                geometry = boxes.map { b ->
                     PageGeometry(
-                        rotation = ((p.rotation % 360) + 360) % 360,
-                        widthPt = crop.width,
-                        heightPt = crop.height,
-                        transform = PageTransform(
-                            crop.lowerLeftX, crop.lowerLeftY, crop.width, crop.height, p.rotation, scale,
-                        ),
+                        rotation = b.rotation,
+                        widthPt = b.width,
+                        heightPt = b.height,
+                        transform = PageTransform(b.left, b.bottom, b.width, b.height, b.rotation, scale),
                     )
                 }
             }
@@ -369,7 +365,13 @@ class PdfDocumentViewModel : ViewModel() {
             renderWithPdfium(index, pxW, pxH)
         } catch (t: Throwable) {
             Log.e(TAG, "pdfium render failed page=$index, falling back to pdfbox", t)
-            renderMutex.withLock { PDFRenderer(requireNotNull(displayDoc)).renderImageWithDPI(index, RENDER_DPI) }
+            renderMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    // Loaded only when pdfium fails: a pdfbox view of the same bytes.
+                    val doc = displayDoc ?: PDDocument.load(requireNotNull(cacheFile)).also { displayDoc = it }
+                    PDFRenderer(doc).renderImageWithDPI(index, RENDER_DPI)
+                }
+            }
         }
 
     // pdfium leaves empty pixels transparent and PDFs assume white paper, so
