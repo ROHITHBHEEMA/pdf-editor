@@ -25,12 +25,41 @@ class DrawNode(
     val fontResourceName: String? = null,
     val fontSize: Float = 0f,
     val colorSpace: String? = null,
+    val run: TextRunInfo? = null,
+)
+
+class TextState(
+    val charSpacing: Float,
+    val wordSpacing: Float,
+    val horizontalScaling: Float, // Tz, percent
+    val leading: Float,
+    val rise: Float,
+    val renderMode: Int,
+)
+
+// Everything needed to re-lay-out and redraw one Tj/TJ/'/" run.
+class TextRunInfo(
+    val fontResourceName: String,
+    val font: PDFont?,
+    val fontSize: Float,
+    val textMatrix: Affine, // Tm at run start
+    val ctm: Affine, // CTM at run start
+    val state: TextState,
+    val fillColorTokens: List<Any>, // tokens that re-establish the current fill
+    val originX: Float, // baseline start, page user space
+    val originY: Float,
+    val endX: Float, // baseline end x, page user space
+    val effectiveFontSize: Float, // fontSize x vertical scale of (Tm.CTM)
+    val isUpright: Boolean, // (Tm.CTM) has no rotation/skew (b~0, c~0, d>0)
+    val text: String,
+    val showOperator: String, // "Tj" | "TJ" | "'" | "\""
 )
 
 class ParsedPage(
     val tokens: List<Any>,
     val root: DrawNode,
     val leaves: List<DrawNode>,
+    val hasTextInForms: Boolean = false,
 )
 
 fun findNode(node: DrawNode, id: Int?): DrawNode? {

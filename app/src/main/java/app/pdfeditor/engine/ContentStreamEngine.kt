@@ -55,6 +55,16 @@ object ContentStreamEngine {
         private var currentFont: PDFont? = null
         private val fontCache = HashMap<String, PDFont?>()
         private var leading = 0f
+        private var charSpacing = 0f
+        private var wordSpacing = 0f
+        private var hScale = 100f
+        private var rise = 0f
+        private var renderMode = 0
+        private var fillTokens: List<Any> = emptyList()
+        private var fillCsTokens: List<Any> = emptyList()
+        private var hasTextInForms = false
+        private var runStartMatrix = Affine.IDENTITY
+        private var runCtm = Affine.IDENTITY
         private val textPreview = StringBuilder()
         private val textFull = StringBuilder()
         private var textRuns = ArrayList<DrawNode>()
@@ -71,7 +81,30 @@ object ContentStreamEngine {
         private var strokeCsLabel: String? = null
         private val csCache = HashMap<String, PDColorSpace?>()
 
-        private class GroupFrame(val openIndex: Int, val children: MutableList<DrawNode> = ArrayList())
+        // Graphics-state parts (besides the CTM) that q/Q save and restore.
+        private class SavedState(
+            val charSpacing: Float, val wordSpacing: Float, val hScale: Float, val leading: Float,
+            val rise: Float, val renderMode: Int, val fontName: String, val fontSize: Float,
+            val font: PDFont?, val fillTokens: List<Any>, val fillCsTokens: List<Any>,
+        )
+
+        private class GroupFrame(
+            val openIndex: Int,
+            val saved: SavedState,
+            val children: MutableList<DrawNode> = ArrayList(),
+        )
+
+        private fun saveState() = SavedState(
+            charSpacing, wordSpacing, hScale, leading, rise, renderMode,
+            fontName, fontSize, currentFont, fillTokens, fillCsTokens,
+        )
+
+        private fun restoreState(s: SavedState) {
+            charSpacing = s.charSpacing; wordSpacing = s.wordSpacing; hScale = s.hScale
+            leading = s.leading; rise = s.rise; renderMode = s.renderMode
+            fontName = s.fontName; fontSize = s.fontSize; currentFont = s.font
+            fillTokens = s.fillTokens; fillCsTokens = s.fillCsTokens
+        }
 
         fun build(): ParsedPage {
             for (i in tokens.indices) {
@@ -104,7 +137,7 @@ object ContentStreamEngine {
                 raw = "",
                 children = rootChildren,
             )
-            return ParsedPage(tokens, root, leaves)
+            return ParsedPage(tokens, root, leaves, hasTextInForms)
         }
 
         private fun currentChildren(): MutableList<DrawNode> =
@@ -115,7 +148,7 @@ object ContentStreamEngine {
         private fun handle(op: String, opIndex: Int, opStart: Int) {
             when (op) {
                 "q" -> {
-                    groupStack.addLast(GroupFrame(opIndex))
+                    groupStack.addLast(GroupFrame(opIndex, saveState()))
                     ctmStack.addLast(ctm())
                 }
                 "Q" -> closeGroup(opIndex)
@@ -144,6 +177,11 @@ object ContentStreamEngine {
                     currentFont = if (fontCos == null) null else resolveFont(fontCos)
                 }
                 "TL" -> if (operands.isNotEmpty()) leading = num(0)
+                "Tc" -> if (operands.isNotEmpty()) charSpacing = num(0)
+                "Tw" -> if (operands.isNotEmpty()) wordSpacing = num(0)
+                "Tz" -> if (operands.isNotEmpty()) hScale = num(0)
+                "Ts" -> if (operands.isNotEmpty()) rise = num(0)
+                "Tr" -> if (operands.isNotEmpty()) renderMode = num(0).toInt()
                 "Td" -> if (operands.size >= 2) moveTextLine(num(0), num(1))
                 "TD" -> if (operands.size >= 2) {
                     leading = -num(1)
@@ -171,20 +209,24 @@ object ContentStreamEngine {
                     emitRun(op, opStart, opIndex)
                 }
                 "\"" -> if (operands.size >= 3) {
+                    wordSpacing = num(0)
+                    charSpacing = num(1)
                     moveTextLine(0f, -leading)
                     beginRun()
                     showText(operands[2] as? COSString)
                     emitRun(op, opStart, opIndex)
                 }
-                "rg" -> { fillColor = rgb(num(0), num(1), num(2)); fillModel = "RGB" }
+                "rg" -> { fillColor = rgb(num(0), num(1), num(2)); fillModel = "RGB"; setFillTokens(opStart, opIndex) }
                 "RG" -> { strokeColor = rgb(num(0), num(1), num(2)); strokeModel = "RGB" }
-                "g" -> { fillColor = rgb(num(0), num(0), num(0)); fillModel = "Gray" }
+                "g" -> { fillColor = rgb(num(0), num(0), num(0)); fillModel = "Gray"; setFillTokens(opStart, opIndex) }
                 "G" -> { strokeColor = rgb(num(0), num(0), num(0)); strokeModel = "Gray" }
-                "k" -> { fillColor = cmyk(num(0), num(1), num(2), num(3)); fillModel = "CMYK" }
+                "k" -> { fillColor = cmyk(num(0), num(1), num(2), num(3)); fillModel = "CMYK"; setFillTokens(opStart, opIndex) }
                 "K" -> { strokeColor = cmyk(num(0), num(1), num(2), num(3)); strokeModel = "CMYK" }
                 "cs" -> {
                     val n = operands.lastOrNull() as? COSName
                     fillCs = colorSpace(n); fillCsLabel = describeColorSpace(n)
+                    fillCsTokens = slice(opStart, opIndex)
+                    fillTokens = fillCsTokens
                 }
                 "CS" -> {
                     val n = operands.lastOrNull() as? COSName
@@ -193,6 +235,7 @@ object ContentStreamEngine {
                 "sc", "scn" -> {
                     resolveCsColor(fillCs)?.let { fillColor = it }
                     fillModel = fillCsLabel
+                    fillTokens = fillCsTokens + slice(opStart, opIndex)
                 }
                 "SC", "SCN" -> {
                     resolveCsColor(strokeCs)?.let { strokeColor = it }
@@ -227,6 +270,7 @@ object ContentStreamEngine {
         private fun closeGroup(closeIndex: Int) {
             if (groupStack.isEmpty()) return
             val frame = groupStack.removeLast()
+            restoreState(frame.saved)
             if (ctmStack.size > 1) ctmStack.removeLast()
             val bounds = Bounds.empty()
             for (c in frame.children) c.bounds?.let { bounds.includeBounds(it) }
@@ -323,14 +367,17 @@ object ContentStreamEngine {
             if (s == null) return
             val bytes = s.bytes
             val font = currentFont
-            val advance: Float
+            var advance: Float
             val decoded = if (font != null) decodeWithFont(font, bytes) else null
             if (decoded != null) {
                 appendText(decoded.text)
                 advance = decoded.width
             } else {
                 appendText(asciiFallback(bytes))
-                advance = bytes.size * fontSize * 0.5f
+                advance = 0f
+                for (byte in bytes) {
+                    advance += glyphAdvance(fontSize * 0.5f, (byte.toInt() and 0xFF) == 32)
+                }
             }
             val ascent = fontSize * 0.75f
             val descent = -fontSize * 0.25f
@@ -348,6 +395,7 @@ object ContentStreamEngine {
                 var width = 0f
                 val input = ByteArrayInputStream(bytes)
                 while (input.available() > 0) {
+                    val before = input.available()
                     val code = font.readCode(input)
                     val u = try {
                         font.toUnicode(code)
@@ -356,16 +404,30 @@ object ContentStreamEngine {
                     }
                     if (u != null) sb.append(u)
                     else if (code in 32..126) sb.append(code.toChar())
-                    width += try {
+                    val glyph = try {
                         font.getDisplacement(code).x * fontSize
                     } catch (_: Exception) {
                         fontSize * 0.5f
                     }
+                    val singleByte = before - input.available() == 1
+                    width += glyphAdvance(glyph, code == 32 && singleByte)
                 }
                 Decoded(sb.toString(), width)
             } catch (_: Exception) {
                 null
             }
+
+        // Text-space advance of one glyph: ((w * Tfs) + Tc + Tw if code 32) * Th.
+        private fun glyphAdvance(glyphWidth: Float, isSpace: Boolean): Float =
+            (glyphWidth + charSpacing + (if (isSpace) wordSpacing else 0f)) * (hScale / 100f)
+
+        private fun slice(start: Int, end: Int): List<Any> =
+            ArrayList<Any>(tokens.subList(start, minOf(end + 1, tokens.size)))
+
+        private fun setFillTokens(opStart: Int, opIndex: Int) {
+            fillCsTokens = emptyList()
+            fillTokens = slice(opStart, opIndex)
+        }
 
         private fun includeQuad(b: Bounds, m: Affine, w: Float, ascent: Float, descent: Float) {
             b.include(m.mapX(0f, descent), m.mapY(0f, descent))
@@ -380,7 +442,7 @@ object ContentStreamEngine {
                 when (val el = a.getObject(i)) {
                     is COSString -> showText(el)
                     is COSNumber -> {
-                        val tx = -el.floatValue() / 1000f * fontSize
+                        val tx = -el.floatValue() / 1000f * fontSize * (hScale / 100f)
                         if (tx > 0.2f * fontSize) appendText(" ")
                         textMatrix = Affine.translate(tx, 0f).then(textMatrix)
                     }
@@ -389,6 +451,8 @@ object ContentStreamEngine {
         }
 
         private fun beginRun() {
+            runStartMatrix = textMatrix
+            runCtm = ctm()
             runBounds = Bounds.empty()
             runText.setLength(0)
         }
@@ -415,7 +479,31 @@ object ContentStreamEngine {
                     fontResourceName = fontName,
                     fontSize = fontSize,
                     colorSpace = fillModel,
+                    run = buildRunInfo(op),
                 ),
+            )
+        }
+
+        private fun buildRunInfo(op: String): TextRunInfo {
+            val start = runStartMatrix.then(runCtm)
+            val end = textMatrix.then(runCtm)
+            val vScale = Math.hypot(start.c.toDouble(), start.d.toDouble()).toFloat()
+            val tol = 1e-3f * maxOf(vScale, 1e-6f)
+            return TextRunInfo(
+                fontResourceName = fontName,
+                font = currentFont,
+                fontSize = fontSize,
+                textMatrix = runStartMatrix,
+                ctm = runCtm,
+                state = TextState(charSpacing, wordSpacing, hScale, leading, rise, renderMode),
+                fillColorTokens = fillTokens,
+                originX = start.mapX(0f, rise),
+                originY = start.mapY(0f, rise),
+                endX = end.mapX(0f, rise),
+                effectiveFontSize = fontSize * vScale,
+                isUpright = Math.abs(start.b) <= tol && Math.abs(start.c) <= tol && start.d > 0f,
+                text = runText.toString(),
+                showOperator = op,
             )
         }
 
@@ -497,6 +585,7 @@ object ContentStreamEngine {
                     is PDFormXObject -> {
                         label = "Form"
                         formBounds(x)?.let { bounds = it }
+                        if (!hasTextInForms && formHasText(x)) hasTextInForms = true
                     }
                     else -> {}
                 }
@@ -517,6 +606,14 @@ object ContentStreamEngine {
                     ctm = ctm(),
                 ),
             )
+        }
+
+        private fun formHasText(form: PDFormXObject): Boolean = try {
+            val parser = PDFStreamParser(form)
+            parser.parse()
+            parser.tokens.any { it is Operator && (it.name == "Tj" || it.name == "TJ" || it.name == "'" || it.name == "\"") }
+        } catch (_: Exception) {
+            false
         }
 
         private fun unitSquare(): Bounds {
