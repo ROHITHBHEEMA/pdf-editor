@@ -37,6 +37,7 @@ class Paragraph(
     val alignment: Alignment,
     val canGrow: Boolean, // false inside a UNIT or on a pinned page
     val nonLatin: Boolean,
+    val runNodes: List<DrawNode>, // exact run nodes composing the paragraph, in reading order
 )
 
 fun Paragraph.text(): String = spans.joinToString("") { it.text }
@@ -51,10 +52,10 @@ object ParagraphDetector {
     private const val MAX_GAP_IN_SIZES = 1.5f
     private const val SPACE_GAP_IN_SIZES = 0.2f
     private const val COLUMN_GAP_IN_SIZES = 1.5f // x gap that splits a UNIT row into separate column pieces
-    private const val UNIT_ORDINAL_STRIDE = 1000 // unique ParagraphId.firstBlock for paragraphs inside a UNIT
 
     /** One visual text line: its runs left to right plus the geometry the join rules use. */
-    private class Line(val runs: List<TextRunInfo>, val blockId: BlockId, val ordinal: Int) {
+    private class Line(val nodes: List<DrawNode>, val blockId: BlockId, val blockIndex: Int) {
+        val runs: List<TextRunInfo> = nodes.map { it.run!! }
         val left = runs.minOf { it.originX }
         val right = runs.maxOf { it.endX }
         val size: Float = runs.groupBy { it.effectiveFontSize }
@@ -71,9 +72,9 @@ object ParagraphDetector {
         page.blocks.forEachIndexed { index, b ->
             when (b.kind) {
                 BlockKind.LINE -> {
-                    val runs = b.runNodes.mapNotNull { it.run }.sortedBy { it.originX }
-                    if (runs.isNotEmpty()) {
-                        val line = Line(runs, b.id, 0)
+                    val nodes = b.runNodes.filter { it.run != null }.sortedBy { it.run!!.originX }
+                    if (nodes.isNotEmpty()) {
+                        val line = Line(nodes, b.id, index)
                         bodyRight = max(bodyRight, line.right)
                         // A LINE block may directly follow the previous line group; collected into one run below.
                         groups += Group(listOf(line), false, index)
@@ -84,18 +85,19 @@ object ParagraphDetector {
             }
         }
         val result = ArrayList<Paragraph>()
+        val unitCounters = HashMap<Int, Int>() // UNIT block index -> paragraphs emitted so far
         // Consecutive single-line non-unit groups form one stream; unit groups and graphics stand alone.
         var stream = ArrayList<Pair<Line, Int>>()
         fun flush() {
             if (stream.isNotEmpty()) {
-                build(stream.map { it.first }, stream.first().second, false, page, bodyRight, result)
+                build(stream.map { it.first }, false, page, bodyRight, result)
                 stream = ArrayList()
             }
         }
         for (g in groups) {
             if (g.unit) {
                 flush()
-                build(g.lines, g.firstBlock, true, page, bodyRight, result)
+                build(g.lines, true, page, bodyRight, result, g.firstBlock, unitCounters)
             } else if (g.lines.isEmpty()) flush()
             else stream += g.lines.single() to g.firstBlock
         }
@@ -105,8 +107,10 @@ object ParagraphDetector {
 
     /** Splits a UNIT's runs into column pieces and returns one stream-group per column (top to bottom). */
     private fun unitGroups(b: Block, index: Int): List<Group> {
-        val runs = b.runNodes.mapNotNull { it.run }
-        if (runs.isEmpty()) return emptyList()
+        val nodes = b.runNodes.filter { it.run != null }
+        if (nodes.isEmpty()) return emptyList()
+        val nodeOf = nodes.associateBy { it.run!! }
+        val runs = nodes.map { it.run!! }
         // Rows by baseline.
         val rows = ArrayList<MutableList<TextRunInfo>>()
         for (r in runs.sortedByDescending { it.originY }) {
@@ -134,9 +138,9 @@ object ParagraphDetector {
             if (c == null) cols += Col(pl, pr, mutableListOf(p))
             else { c.l = min(c.l, pl); c.r = max(c.r, pr); c.ps += p }
         }
-        return cols.sortedBy { it.l }.mapIndexed { ci, c ->
+        return cols.sortedBy { it.l }.map { c ->
             val lines = c.ps.sortedByDescending { p -> p.first().originY }
-                .mapIndexed { i, p -> Line(p, b.id, ci * 100 + i) }
+                .map { p -> Line(p.map { nodeOf.getValue(it) }, b.id, index) }
             Group(lines, true, index)
         }
     }
@@ -151,7 +155,11 @@ object ParagraphDetector {
             val firstGap = cur[0].baseline - cur[1].baseline
             if (abs(gap - firstGap) > GAP_RATIO_TOL * firstGap) return false
         }
-        if (cur.size == 1) return true // second line may differ in left edge (first-line indent)
+        if (cur.size == 1) {
+            // Second line: same left edge, or the first line is indented by up to 4 sizes.
+            val d = first.left - next.left
+            return abs(d) <= EDGE_TOL || (d > EDGE_TOL && d <= 4f * first.size)
+        }
         val ref = cur[1]
         val leftOk = abs(next.left - ref.left) <= EDGE_TOL
         val centred = cur.all { abs(it.mid - first.mid) <= EDGE_TOL } && abs(next.mid - first.mid) <= EDGE_TOL
@@ -160,36 +168,41 @@ object ParagraphDetector {
     }
 
     private fun build(
-        lines: List<Line>, firstBlock: Int, unit: Boolean, page: PageAnalysis,
-        bodyRight: Float, out: MutableList<Paragraph>,
+        lines: List<Line>, unit: Boolean, page: PageAnalysis,
+        bodyRight: Float, out: MutableList<Paragraph>, unitIndex: Int = 0, unitCounters: MutableMap<Int, Int> = HashMap(),
     ) {
         var i = 0
         while (i < lines.size) {
             val cur = mutableListOf(lines[i])
             i++
             while (i < lines.size && joins(cur, lines[i])) { cur += lines[i]; i++ }
-            out += make(cur, firstBlock, unit, page, bodyRight)
+            val sub = if (unit) unitCounters.merge(unitIndex, 1, Int::plus)!! else 0
+            out += make(cur, sub, unit, page, bodyRight)
         }
     }
 
-    private fun make(lines: List<Line>, firstBlock: Int, unit: Boolean, page: PageAnalysis, bodyRight: Float): Paragraph {
+    private fun make(lines: List<Line>, sub: Int, unit: Boolean, page: PageAnalysis, bodyRight: Float): Paragraph {
         val first = lines[0]
         val n = lines.size
         val left = lines.minOf { it.left }
         var right = lines.maxOf { it.right }
         if (n == 1 && !unit) right = max(right, bodyRight)
-        val firstLineIndent = if (n >= 2) max(0f, first.left - lines[1].left) else 0f
-        val lineAdvance = if (n >= 2) first.baseline - lines[1].baseline else 1.2f * first.size
+                val lineAdvance = if (n >= 2) first.baseline - lines[1].baseline else 1.2f * first.size
         val lineRight = lines.maxOf { it.right }
 
         val alignment = when {
             n < 2 -> Alignment.LEFT
-            n >= 3 && lines.dropLast(1).all { abs(it.right - lineRight) <= EDGE_TOL } -> Alignment.JUSTIFIED
+            // Needs >= 3 lines: with 2, the single non-last line is trivially at the right edge (vacuous).
+            n >= 3 && lines.dropLast(1).all { abs(it.right - lineRight) <= EDGE_TOL } &&
+                lines.drop(1).all { abs(it.left - lines[1].left) <= EDGE_TOL } -> Alignment.JUSTIFIED
             lines.all { abs(it.left - first.left) <= EDGE_TOL } -> Alignment.LEFT
             lines.all { abs(it.mid - first.mid) <= EDGE_TOL } -> Alignment.CENTER
             lines.all { abs(it.right - first.right) <= EDGE_TOL } -> Alignment.RIGHT
             else -> Alignment.LEFT
         }
+
+        val firstLineIndent =
+            if (n >= 2 && (alignment == Alignment.LEFT || alignment == Alignment.JUSTIFIED)) max(0f, first.left - lines[1].left) else 0f
 
         val spans = ArrayList<Span>()
         fun append(text: String, style: SpanStyle) {
@@ -199,25 +212,25 @@ object ParagraphDetector {
                 spans[spans.lastIndex] = Span(last.text + text, last.style)
             } else spans += Span(text, style)
         }
-        fun appendSpace() {
+        fun appendSpace(next: String) {
             val last = spans.lastOrNull() ?: return
-            if (!last.text.endsWith(" ")) spans[spans.lastIndex] = Span(last.text + " ", last.style)
+            if (!last.text.endsWith(" ") && !next.firstOrNull().let { it != null && it.isWhitespace() }) spans[spans.lastIndex] = Span(last.text + " ", last.style)
         }
         lines.forEachIndexed { li, line ->
-            if (li > 0) appendSpace()
+            if (li > 0) appendSpace(line.runs[0].text)
             line.runs.forEachIndexed { ri, r ->
                 if (ri > 0) {
                     val gap = r.originX - line.runs[ri - 1].endX
-                    if (gap > SPACE_GAP_IN_SIZES * line.size) appendSpace()
+                    if (gap > SPACE_GAP_IN_SIZES * line.size) appendSpace(r.text)
                 }
                 append(r.text, styleOf(r))
             }
         }
-        val id = ParagraphId(page.pageIndex, if (unit) firstBlock + UNIT_ORDINAL_STRIDE * (lines[0].ordinal + 1) else firstBlock)
+        val id = ParagraphId(page.pageIndex, lines[0].blockIndex, sub)
         val text = spans.joinToString("") { it.text }
         return Paragraph(
             id, lines.map { it.blockId }, spans, left, right, firstLineIndent, lineAdvance,
-            first.baseline, alignment, canGrow = !unit && page.pinned == null, nonLatin = !isLatinText(text),
+            first.baseline, alignment, canGrow = !unit && page.pinned == null, nonLatin = !isLatinText(text), runNodes = lines.flatMap { it.nodes },
         )
     }
 
@@ -228,8 +241,7 @@ object ParagraphDetector {
 
     private fun tokenString(t: Any): String = when (t) {
         is COSNumber -> {
-            val v = t.floatValue()
-            if (v == v.toLong().toFloat()) v.toLong().toString() else v.toString()
+            java.math.BigDecimal(t.floatValue().toString()).stripTrailingZeros().toPlainString()
         }
         is Operator -> t.name
         is COSName -> "/" + t.name

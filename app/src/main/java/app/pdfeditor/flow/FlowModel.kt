@@ -4,8 +4,11 @@ import app.pdfeditor.engine.DrawNode
 import app.pdfeditor.engine.ParsedPage
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 
-/** Identifies a paragraph by its page and the index of its first LINE block (used by Task 4). */
-data class ParagraphId(val page: Int, val firstBlock: Int)
+/**
+ * Identifies a paragraph by page and the index of its first LINE block (sub = 0), or, for a paragraph inside a UNIT,
+ * the UNIT block index plus the 1-based ordinal of the paragraph within that unit.
+ */
+data class ParagraphId(val page: Int, val firstBlock: Int, val sub: Int = 0)
 
 sealed class BlockId {
     data class Orig(val page: Int, val index: Int) : BlockId()

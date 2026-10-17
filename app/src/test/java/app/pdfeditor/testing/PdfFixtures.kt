@@ -218,6 +218,41 @@ object PdfFixtures {
         }
     }
 
+    /**
+     * Draws each (text, x, baselineY) as its own 11pt line. With [align] "center" / "right", x is ignored and the
+     * line is centred on / right-aligned to [edge].
+     */
+    fun positioned(items: List<Triple<String, Float, Float>>, align: String = "left", edge: Float = 0f): ByteArray {
+        PDDocument().use { doc ->
+            val f = font(doc)
+            val page = PDPage(PDRectangle.A4)
+            doc.addPage(page)
+            PDPageContentStream(doc, page).use { s ->
+                for ((text, x0, y) in items) {
+                    val w = width(f, text, 11f)
+                    val x = when (align) { "center" -> edge - w / 2f; "right" -> edge - w; else -> x0 }
+                    s.beginText(); s.setFont(f, 11f); s.newLineAtOffset(x, y); s.showText(text); s.endText()
+                }
+            }
+            return save(doc)
+        }
+    }
+
+    /** One line made of two runs "a" and " b" separated by a space-sized gap. */
+    fun doubleSpaceLine(): ByteArray {
+        PDDocument().use { doc ->
+            val f = font(doc)
+            val page = PDPage(PDRectangle.A4)
+            doc.addPage(page)
+            PDPageContentStream(doc, page).use { s ->
+                val y = page.mediaBox.height - 72f
+                s.beginText(); s.setFont(f, 11f); s.newLineAtOffset(72f, y); s.showText("a"); s.endText()
+                s.beginText(); s.setFont(f, 11f); s.newLineAtOffset(72f + width(f, "a", 11f) + 4f, y); s.showText(" b"); s.endText()
+            }
+            return save(doc)
+        }
+    }
+
     fun sampleLetter(): ByteArray =
         PdfFixtures::class.java.getResourceAsStream("/fixtures/sample-letter.pdf")!!.use { it.readBytes() }
 }
