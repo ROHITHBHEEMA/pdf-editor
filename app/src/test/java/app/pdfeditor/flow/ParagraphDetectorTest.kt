@@ -69,7 +69,7 @@ class ParagraphDetectorTest {
     }
 
     @Test fun centerAndRightDetectedWithZeroIndent() {
-        val items = listOf("alpha beta gamma", "alpha beta gamma delta", "alpha beta").mapIndexed { i, t -> Triple(t, 0f, top - 16f * i) }
+        val items = listOf("short", "a considerably longer line of text", "mid length").mapIndexed { i, t -> Triple(t, 0f, top - 16f * i) }
         val c = detect(PdfFixtures.positioned(items, "center", 300f)).single()
         assertEquals(Alignment.CENTER, c.alignment); assertEquals(0f, c.firstLineIndent, 0f)
         val r = detect(PdfFixtures.positioned(items, "right", 500f)).single()

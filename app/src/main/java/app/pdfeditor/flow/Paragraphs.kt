@@ -156,9 +156,10 @@ object ParagraphDetector {
             if (abs(gap - firstGap) > GAP_RATIO_TOL * firstGap) return false
         }
         if (cur.size == 1) {
-            // Second line: same left edge, or the first line is indented by up to 4 sizes.
+            // Second line: same left edge, first-line indent (up to 4 sizes), or same midpoint / right edge.
             val d = first.left - next.left
-            return abs(d) <= EDGE_TOL || (d > EDGE_TOL && d <= 4f * first.size)
+            return abs(d) <= EDGE_TOL || (d > EDGE_TOL && d <= 4f * first.size) ||
+                abs(next.mid - first.mid) <= EDGE_TOL || abs(next.right - first.right) <= EDGE_TOL
         }
         val ref = cur[1]
         val leftOk = abs(next.left - ref.left) <= EDGE_TOL
