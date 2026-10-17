@@ -198,6 +198,26 @@ object PdfFixtures {
         }
     }
 
+    /** One line "plain BOLD plain" where the middle word is LiberationSerif-Bold (three runs, one baseline). */
+    fun boldWordLine(): ByteArray {
+        PDDocument().use { doc ->
+            val regular = font(doc)
+            val bold = font(doc, "LiberationSerif-Bold")
+            val page = PDPage(PDRectangle.A4)
+            doc.addPage(page)
+            PDPageContentStream(doc, page).use { s ->
+                val y = page.mediaBox.height - 72f
+                var x = 72f
+                val space = width(regular, " ", 11f)
+                for ((text, f) in listOf("This is" to regular, "important" to bold, "for everyone." to regular)) {
+                    s.beginText(); s.setFont(f, 11f); s.newLineAtOffset(x, y); s.showText(text); s.endText()
+                    x += width(f, text, 11f) + space
+                }
+            }
+            return save(doc)
+        }
+    }
+
     fun sampleLetter(): ByteArray =
         PdfFixtures::class.java.getResourceAsStream("/fixtures/sample-letter.pdf")!!.use { it.readBytes() }
 }
