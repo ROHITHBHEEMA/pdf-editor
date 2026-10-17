@@ -63,6 +63,7 @@ object ContentStreamEngine {
         private var fillTokens: List<Any> = emptyList()
         private var fillCsTokens: List<Any> = emptyList()
         private var hasTextInForms = false
+        private val formTextCache = HashMap<String, Boolean>()
         private var runStartMatrix = Affine.IDENTITY
         private var runCtm = Affine.IDENTITY
         private val textPreview = StringBuilder()
@@ -585,7 +586,7 @@ object ContentStreamEngine {
                     is PDFormXObject -> {
                         label = "Form"
                         formBounds(x)?.let { bounds = it }
-                        if (!hasTextInForms && formHasText(x)) hasTextInForms = true
+                        if (!hasTextInForms && formTextCache.getOrPut(n) { formHasText(x) }) hasTextInForms = true
                     }
                     else -> {}
                 }

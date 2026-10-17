@@ -1,16 +1,22 @@
 package app.pdfeditor.testing
 
 /** Hand-built one-page PDF (Helvetica as /F1) whose content stream is [content]. */
-fun miniPdf(content: String): ByteArray {
+fun miniPdf(content: String, forms: Map<String, String> = emptyMap()): ByteArray {
     val length = content.toByteArray(Charsets.ISO_8859_1).size
     val objects = listOf(
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-            "/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+            "/Resources << /Font << /F1 5 0 R >>" +
+            (if (forms.isEmpty()) "" else " /XObject << " +
+                forms.keys.withIndex().joinToString(" ") { (i, k) -> "/$k ${6 + i} 0 R" } + " >>") +
+            " >> /Contents 4 0 R >>",
         "<< /Length $length >>\nstream\n${content}endstream",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    )
+    ) + forms.values.map { c ->
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] " +
+            "/Resources << /Font << /F1 5 0 R >> >> /Length ${c.length} >>\nstream\n${c}\nendstream"
+    }
     val sb = StringBuilder()
     sb.append("%PDF-1.4\n")
     val offsets = IntArray(objects.size + 1)

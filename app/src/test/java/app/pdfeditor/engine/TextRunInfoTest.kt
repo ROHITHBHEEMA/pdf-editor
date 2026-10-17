@@ -69,4 +69,48 @@ class TextRunInfoTest {
         assertEquals(5f, spaced.endX - plain.endX, 0.01f)
         assertEquals("Tj", spaced.showOperator)
     }
+
+    @Test fun quoteOperatorsMoveLineAndSetSpacing() {
+        val r = runs(miniPdf("BT /F1 10 Tf 12 TL 1 0 0 1 72 700 Tm (a) Tj (b) ' 3 1 (c) \" ET"))
+        assertEquals(688f, r[1].originY, 0.01f); assertEquals(688f, r[1].textMatrix.f, 0.01f)
+        assertEquals(676f, r[2].originY, 0.01f)
+        assertEquals(3f, r[2].state.wordSpacing, 0f); assertEquals(1f, r[2].state.charSpacing, 0f)
+    }
+
+    @Test fun tjAdjustmentScaledByHorizontalScaling() {
+        val run = runs(miniPdf("BT /F1 10 Tf 50 Tz 1 0 0 1 100 700 Tm [(A) -1000 (B)] TJ ET")).single()
+        assertEquals(100f + 0.5f * (6.67f + 10f + 6.67f), run.endX, 0.05f)
+    }
+
+    @Test fun riseShiftsBaseline() {
+        val run = runs(miniPdf("BT /F1 10 Tf 5 Ts 1 0 0 1 100 700 Tm (A) Tj ET")).single()
+        assertEquals(705f, run.originY, 0.01f); assertEquals(5f, run.state.rise, 0f)
+    }
+
+    @Test fun csAndScnComposeFillTokens() {
+        val run = runs(miniPdf("/DeviceRGB cs 0.1 0.2 0.3 scn BT /F1 10 Tf 10 10 Td (A) Tj ET")).single()
+        assertEquals(
+            listOf("/DeviceRGB", "cs", "0.1", "0.2", "0.3", "scn"),
+            run.fillColorTokens.map(::tokenString),
+        )
+    }
+
+    @Test fun qRestoresFontAndTextState() {
+        val r = runs(miniPdf("q BT /F1 20 Tf 3 Tc 10 10 Td (A) Tj ET Q BT 10 20 Td (B) Tj ET"))
+        assertEquals(20f, r[0].fontSize, 0f); assertEquals(3f, r[0].state.charSpacing, 0f)
+        assertEquals(0f, r[1].state.charSpacing, 0f)
+    }
+
+    @Test fun qRestoresEarlierFont() {
+        val r = runs(miniPdf("BT /F1 12 Tf q /F1 20 Tf 3 Tc Q 10 10 Td (A) Tj ET"))
+        assertEquals(12f, r.single().fontSize, 0f); assertEquals(0f, r.single().state.charSpacing, 0f)
+    }
+
+    private fun hasTextInForms(pdf: ByteArray) =
+        PDDocument.load(pdf).use { ContentStreamEngine.parse(it.getPage(0)).hasTextInForms }
+
+    @Test fun hasTextInFormsDetectsShowOperators() {
+        assertTrue(hasTextInForms(miniPdf("/Fm1 Do", mapOf("Fm1" to "BT /F1 10 Tf (x) Tj ET"))))
+        assertFalse(hasTextInForms(miniPdf("/Fm1 Do", mapOf("Fm1" to "0 0 10 10 re f"))))
+    }
 }

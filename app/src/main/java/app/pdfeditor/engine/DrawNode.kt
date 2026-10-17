@@ -42,7 +42,11 @@ class TextRunInfo(
     val fontResourceName: String,
     val font: PDFont?,
     val fontSize: Float,
-    val textMatrix: Affine, // Tm at run start
+    /**
+     * Tm at the first glyph; for ' and " this is after their implicit T* move, so a redraw
+     * must show the string with Tj, not replay the operator.
+     */
+    val textMatrix: Affine,
     val ctm: Affine, // CTM at run start
     val state: TextState,
     val fillColorTokens: List<Any>, // tokens that re-establish the current fill
