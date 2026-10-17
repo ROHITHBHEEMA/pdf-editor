@@ -16,13 +16,14 @@ class FontPlan(
     fun encode(style: SpanStyle, text: String): ByteArray {
         val font = fontFor(style)
         val out = java.io.ByteArrayOutputStream()
+        val src = text.replace('\t', ' ')
         var i = 0
-        while (i < text.length) {
-            val cp = text.codePointAt(i)
+        while (i < src.length) {
+            val cp = src.codePointAt(i)
             i += Character.charCount(cp)
             val s = String(Character.toChars(cp))
             val bytes = try { font.encode(s) } catch (_: Exception) { observed.codesFor(font, cp) }
-                ?: throw IllegalArgumentException("Cannot encode '$s' (U+%04X) in font ${font.name}".format(cp))
+                ?: throw IllegalArgumentException("Cannot encode '$s' (${String.format("U+%04X", cp)}) in font ${font.name}")
             out.write(bytes)
         }
         return out.toByteArray()

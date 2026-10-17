@@ -25,7 +25,8 @@ class ObservedEncodings {
     }
 
     private fun scan(font: PDFont, s: COSString) {
-        val input = ByteArrayInputStream(s.bytes)
+        val all = s.bytes
+        val input = ByteArrayInputStream(all)
         while (input.available() > 0) {
             val before = input.available()
             val code = try { font.readCode(input) } catch (_: Exception) { return }
@@ -34,8 +35,8 @@ class ObservedEncodings {
             val u = try { font.toUnicode(code) } catch (_: Exception) { null } ?: continue
             if (u.isEmpty() || u.codePointCount(0, u.length) != 1) continue
             // Re-derive the code's bytes from the original string.
-            val start = s.bytes.size - before
-            record(font, u.codePointAt(0), s.bytes.copyOfRange(start, start + consumed))
+            val start = all.size - before
+            record(font, u.codePointAt(0), all.copyOfRange(start, start + consumed))
         }
     }
 

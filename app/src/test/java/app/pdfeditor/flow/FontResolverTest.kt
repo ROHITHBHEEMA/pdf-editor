@@ -49,6 +49,13 @@ class FontResolverTest {
         assertTrue(plan("नमस्ते") is FontPlanResult.Unsupported)
     }
 
+    @Test fun encodeMapsTabToSpace() {
+        withSample { doc, style ->
+            val ok = FontResolver.plan(doc, listOf(Span("a b", style)), TestFontProvider) as FontPlanResult.Ok
+            org.junit.Assert.assertArrayEquals(ok.plan.encode(style, "a b"), ok.plan.encode(style, "a\tb"))
+        }
+    }
+
     @Test fun tabBecomesSpace() {
         assertTrue(plan("a\tb") is FontPlanResult.Ok)
     }
