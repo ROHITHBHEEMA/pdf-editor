@@ -1,8 +1,6 @@
 package app.pdfeditor
 
 import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import app.pdfeditor.flow.FontProvider
 import com.tom_roush.fontbox.ttf.TrueTypeCollection
 import com.tom_roush.fontbox.ttf.TrueTypeFont
@@ -15,24 +13,13 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 
-const val AUTO_FONT_ID = "auto"
+enum class FontSource { BUNDLED, SYSTEM }
 
-enum class FontSource { BUNDLED, SYSTEM, CUSTOM }
-
-class FontOption(
-    val id: String,
-    val displayName: String,
-    val source: FontSource,
-)
-
-// Supplies replacement fonts for text edits from three places: Liberation
-// fonts bundled in assets, the device's /system/fonts, and user imports kept
-// in filesDir. resolve embeds a chosen font into the open document; small
-// fonts are embedded whole and cached so reuse dedups, large ones (CJK) are
+// Supplies replacement fonts for text edits from two places: fonts bundled in
+// assets and the device's /system/fonts. resolve embeds a chosen font into the
+// open document; small fonts are embedded whole and cached so reuse dedups, large ones (CJK) are
 // subset fresh per edit so pdfbox can finalize each subset on the next save.
 class FontCatalog(private val appContext: Context) : FontProvider {
-
-    private val customDir: File = File(appContext.filesDir, "fonts").apply { mkdirs() }
 
     private var cacheDoc: PDDocument? = null
     private val fullEmbedCache = HashMap<String, PDFont>()
@@ -47,14 +34,6 @@ class FontCatalog(private val appContext: Context) : FontProvider {
         val embedSubset: Boolean,
         val load: (PDDocument) -> PDFont,
     )
-
-    fun options(): List<FontOption> {
-        val all = ArrayList<Entry>(bundled.size + system.size + 8)
-        all.addAll(bundled)
-        all.addAll(system)
-        all.addAll(scanCustom())
-        return all.map { FontOption(it.id, it.displayName, it.source) }
-    }
 
     override fun load(doc: PDDocument, id: String): PDFont? = resolve(doc, id)
 
@@ -80,81 +59,6 @@ class FontCatalog(private val appContext: Context) : FontProvider {
     // aliases (Arial, Times, Courier, Calibri, Cambria) and an exact system
     // font by family are confident; Panose and flag bucketing are not.
     fun autoMatchId(original: PDFont?): String? = matchInternal(original)?.id
-
-    // Only the high-confidence matches, for the prefer-confident edit policy.
-    fun confidentMatchId(original: PDFont?): String? =
-        matchInternal(original)?.takeIf { it.confident }?.id
-
-    // Which matcher step decided, for the debug overlay.
-    fun explainMatch(original: PDFont?): MatchExplain {
-        val m = matchInternal(original)
-        val name = (try {
-            original?.fontDescriptor?.fontName
-        } catch (_: Exception) {
-            null
-        }) ?: "(none)"
-        return MatchExplain(
-            name.substringAfterLast('+'), m?.step ?: "none",
-            m?.id?.removePrefix("bundled:"), m?.confident ?: false, m?.detail,
-        )
-    }
-
-    // Scale for the substitute's point size so its advance widths match the
-    // original's. The matcher keeps the width profile but not absolute scale, so
-    // a nearest clone can run a few percent wide and the text grows after an
-    // edit; this pins it back. 1f for non-bundled faces or too little data.
-    fun widthScale(original: PDFont?, id: String): Float {
-        original ?: return 1f
-        if (!id.startsWith("bundled:")) return 1f
-        val cand = WIDTH_TABLE[id.removePrefix("bundled:").substringBeforeLast('-')] ?: return 1f
-        var oSum = 0f
-        var cSum = 0f
-        var n = 0
-        for (i in WIDTH_REF.indices) {
-            val w = try {
-                original.getStringWidth(WIDTH_REF[i].toString())
-            } catch (_: Exception) {
-                0f
-            }
-            if (w > 0f) { oSum += w; cSum += cand[i]; n++ }
-        }
-        if (n < 4 || cSum <= 0f) return 1f
-        return (oSum / cSum).coerceIn(0.5f, 2f)
-    }
-
-    // A loadable typeface for the auto match so the inline editor can render the
-    // fallback while typing, matching what the commit will embed.
-    fun autoMatchFace(original: PDFont?): FaceSource? = autoMatchId(original)?.let { faceFor(it) }
-
-    // Maps a catalog id to where its glyphs live, for previewing in Compose.
-    // Null for .ttc collections, which the Compose font loader can't open.
-    fun faceFor(id: String): FaceSource? = when {
-        id.startsWith("bundled:") ->
-            FaceSource.Asset("fonts/${id.substringAfter("bundled:")}.ttf")
-        id.startsWith("system:") -> {
-            val path = id.substringAfter("system:")
-            if (path.endsWith(".ttc", true)) null else FaceSource.FileFace(File(path))
-        }
-        id.startsWith("custom:") -> {
-            val name = id.substringAfter("custom:")
-            if (name.endsWith(".ttc", true)) null else FaceSource.FileFace(File(customDir, name))
-        }
-        else -> null
-    }
-
-    sealed class FaceSource {
-        class Asset(val path: String) : FaceSource()
-        class FileFace(val file: File) : FaceSource()
-    }
-
-    // Why a given substitute was chosen, surfaced in the debug overlay.
-    class MatchExplain(
-        val original: String,
-        val step: String,
-        val match: String?,
-        val confident: Boolean,
-        val detail: String?,
-    )
 
     private class Match(
         val id: String,
@@ -387,29 +291,8 @@ class FontCatalog(private val appContext: Context) : FontProvider {
             }
         }
 
-    fun importFont(uri: Uri): Boolean {
-        return try {
-            val target = uniqueFile(sanitize(queryName(uri) ?: "font.ttf"))
-            appContext.contentResolver.openInputStream(uri).use { input ->
-                input ?: return false
-                target.outputStream().use { input.copyTo(it) }
-            }
-            if (target.length() > 0) {
-                true
-            } else {
-                target.delete()
-                false
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun findEntry(id: String): Entry? {
-        bundled.firstOrNull { it.id == id }?.let { return it }
-        system.firstOrNull { it.id == id }?.let { return it }
-        return scanCustom().firstOrNull { it.id == id }
-    }
+    private fun findEntry(id: String): Entry? =
+        bundled.firstOrNull { it.id == id } ?: system.firstOrNull { it.id == id }
 
     private fun buildBundled(): List<Entry> {
         val defs = listOf(
@@ -492,23 +375,6 @@ class FontCatalog(private val appContext: Context) : FontProvider {
         return out
     }
 
-    private fun scanCustom(): List<Entry> {
-        val files = customDir.listFiles() ?: return emptyList()
-        val out = ArrayList<Entry>()
-        for (f in files.sortedBy { it.name }) {
-            val lower = f.name.lowercase()
-            val ttc = lower.endsWith(".ttc")
-            if (!lower.endsWith(".ttf") && !lower.endsWith(".otf") && !ttc) continue
-            val subset = ttc || f.length() > SUBSET_THRESHOLD
-            out.add(
-                Entry("custom:${f.name}", prettyName(f.name), FontSource.CUSTOM, subset) { doc ->
-                    if (ttc) loadFromCollection(doc, f) else loadFile(doc, f, subset)
-                },
-            )
-        }
-        return out
-    }
-
     private fun loadFile(doc: PDDocument, file: File, embedSubset: Boolean): PDFont =
         FileInputStream(file).use { PDType0Font.load(doc, it, embedSubset) }
 
@@ -528,32 +394,6 @@ class FontCatalog(private val appContext: Context) : FontProvider {
             .replace(Regex("(?<=[a-z])(?=[A-Z])"), " ")
             .trim()
         return stem.ifEmpty { fileName }
-    }
-
-    private fun queryName(uri: Uri): String? = try {
-        appContext.contentResolver
-            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun sanitize(name: String): String {
-        val base = name.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
-        return if (base.contains('.')) base else "$base.ttf"
-    }
-
-    private fun uniqueFile(name: String): File {
-        var f = File(customDir, name)
-        if (!f.exists()) return f
-        val stem = name.substringBeforeLast('.')
-        val ext = name.substringAfterLast('.', "ttf")
-        var i = 1
-        while (f.exists()) {
-            f = File(customDir, "$stem-$i.$ext")
-            i++
-        }
-        return f
     }
 
     companion object {

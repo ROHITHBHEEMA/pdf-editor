@@ -23,7 +23,8 @@ object FontResolver {
         provider: FontProvider,
         observed: ObservedEncodings = ObservedEncodings.build(doc),
     ): FontPlanResult {
-        val texts = spans.map { it.text.replace('\t', ' ') }
+        // A tab is drawn as a space; a newline is a line break, never a glyph.
+        val texts = spans.map { it.text.replace('\t', ' ').replace("\n", "") }
 
         // Reuse the embedded fonts when they can draw everything.
         val own = HashMap<SpanStyle, PDFont>()

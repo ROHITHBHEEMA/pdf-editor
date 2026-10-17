@@ -78,6 +78,12 @@ class EditSessionTest {
         assertEquals(1, PDDocument.load(saved()).use { it.numberOfPages })
     }
 
+    @Test fun lineBreaksFromEnterApplyWithoutSubstitution() {
+        val text = List(6) { longText }.joinToString("\n")
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(longId, text)))
+        assertEquals(2, s.pageCount)
+    }
+
     @Test fun shorterParagraphPullsContentUp() {
         val before = originY(bytes, "Warm regards,")
         assertEquals(EditOutcome.Applied, s.apply(EditParagraph(longId, "The construction team is on schedule.")))

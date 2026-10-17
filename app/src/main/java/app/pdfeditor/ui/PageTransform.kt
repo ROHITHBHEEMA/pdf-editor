@@ -3,9 +3,8 @@ package app.pdfeditor.ui
 import androidx.compose.ui.geometry.Rect
 import app.pdfeditor.engine.Bounds
 
-// Maps PDF user-space bounds onto the rendered page bitmap (pixels). Rotation
-// 0 is exact; 90/180/270 are best-effort and may be slightly off on the canvas
-// highlight, but tree selection and deletion never depend on this mapping.
+// Maps PDF user-space bounds onto the rendered page bitmap (pixels) and bitmap
+// pixels back to user space. Rotation 0 is exact; 90/180/270 are best-effort.
 class PageTransform(
     private val cropX: Float,
     private val cropY: Float,
@@ -41,5 +40,18 @@ class PageTransform(
             if (by > bottom) bottom = by
         }
         return Rect(left, top, right, bottom)
+    }
+
+    /** Inverse of [toRect] for one bitmap pixel: the PDF user-space point under it. */
+    fun toPage(px: Float, py: Float): Pair<Float, Float> {
+        val dx = px / scale
+        val dy = py / scale
+        val (u, v) = when (((rotation % 360) + 360) % 360) {
+            90 -> dy to dx
+            180 -> (cropW - dx) to dy
+            270 -> (cropW - dy) to (cropH - dx)
+            else -> dx to (cropH - dy)
+        }
+        return (u + cropX) to (v + cropY)
     }
 }

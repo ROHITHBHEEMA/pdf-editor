@@ -1,7 +1,5 @@
 package app.pdfeditor
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -15,436 +13,353 @@ import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.pdmodel.font.PDFont
-import com.tom_roush.pdfbox.rendering.PDFRenderer
-import app.pdfeditor.engine.ContentStreamEngine
-import app.pdfeditor.engine.DrawNode
-import app.pdfeditor.engine.EditCaps
-import app.pdfeditor.engine.EditRequest
-import app.pdfeditor.engine.EditResult
-import app.pdfeditor.engine.ElementEditor
-import app.pdfeditor.engine.NodeKind
-import app.pdfeditor.engine.ParsedPage
-import app.pdfeditor.engine.collectGroupIds
-import app.pdfeditor.engine.findNode
+import app.pdfeditor.flow.EditOp
+import app.pdfeditor.flow.EditOutcome
+import app.pdfeditor.flow.EditSession
+import app.pdfeditor.flow.FontWarning
+import app.pdfeditor.flow.OpenResult
+import app.pdfeditor.flow.ParagraphHit
+import app.pdfeditor.flow.RejectReason
 import app.pdfeditor.ui.PageTransform
+import app.pdfeditor.ui.spacedChars
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.rendering.PDFRenderer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/**
+ * Drives the editor screen from one [EditSession]. The session's current state is written to
+ * `cacheDir/working.pdf` and shown through PdfRenderer. Every heavy session call runs on the IO dispatcher; an
+ * unexpected failure shows [SOMETHING_WRONG] and leaves the previous document state in place.
+ */
 class PdfDocumentViewModel : ViewModel() {
 
     var state by mutableStateOf(PdfUiState())
         private set
 
-    private var document: PDDocument? = null
-    var parsed: ParsedPage? = null
-        private set
+    private var session: EditSession? = null
+    private var fonts: FontCatalog? = null
+    private var pendingEdit: EditOp.EditParagraph? = null
 
+    // Display of the current session state: the cache file, pdfium on it, and a pdfbox view of the same bytes
+    // for page geometry and as a render fallback.
+    private var cacheFile: File? = null
     private var pdfRenderer: PdfRenderer? = null
     private var pfd: ParcelFileDescriptor? = null
-    private var cacheFile: File? = null
+    private var displayDoc: PDDocument? = null
+    private var geometry: List<PageGeometry> = emptyList()
     private val renderMutex = Mutex()
 
-    private var fontCatalog: FontCatalog? = null
-    private var embeddedFonts = false
-
-    private val undoStack = ArrayDeque<EditSnapshot>()
-    private val redoStack = ArrayDeque<EditSnapshot>()
-    private var historyBytes = 0L
+    private val busy get() = state.busy != null
 
     fun open(context: Context, uri: Uri) {
-        state = state.copy(loading = true, error = null)
+        if (busy) return
+        val app = context.applicationContext
+        val file = File(app.cacheDir, CACHE_NAME).also { cacheFile = it }
+        state = state.copy(busy = BUSY_OPENING)
         viewModelScope.launch {
-            try {
-                val loaded = withContext(Dispatchers.IO) {
-                    val bytes = context.contentResolver.openInputStream(uri).use { input ->
-                        requireNotNull(input) { "Cannot open the selected file" }.readBytes()
-                    }
-                    val file = File(context.cacheDir, "working.pdf")
-                    file.writeBytes(bytes)
-                    PDDocument.load(bytes) to file
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes == null) null
+                    else EditSession.open(bytes, fonts ?: FontCatalog(app).also { fonts = it })
                 }
-                document?.close()
-                closeRenderer()
-                clearHistory()
-                document = loaded.first
-                cacheFile = loaded.second
-                fontCatalog = FontCatalog(context.applicationContext)
-                embeddedFonts = false
-                openRenderer(loaded.second)
-                renderPage(0)
-                state = state.copy(
-                    loading = false,
-                    hasDocument = true,
-                    pageCount = loaded.first.numberOfPages,
-                    pageIndex = 0,
-                    fileName = displayName(context, uri),
-                    documentToken = state.documentToken + 1,
-                    canUndo = false,
-                    canRedo = false,
-                )
             } catch (t: Throwable) {
                 Log.e(TAG, "open failed", t)
-                state = state.copy(loading = false, error = t.message ?: "Failed to open PDF")
+                null
+            }
+            when (result) {
+                is OpenResult.Opened -> adopt(file, result.session, displayName(app, uri))
+                OpenResult.PasswordProtected -> fail(PASSWORD)
+                is OpenResult.Failed, null -> fail(OPEN_FAILED)
             }
         }
+    }
+
+    /** Shows a newly opened session and makes it current; on failure the previous document stays. */
+    private suspend fun adopt(file: File, next: EditSession, name: String) {
+        val shown = try {
+            showSession(file, next, 0)
+        } catch (t: Throwable) {
+            Log.e(TAG, "first render failed", t)
+            false
+        }
+        if (!shown) {
+            runCatching { next.close() }
+            session?.let { old -> runCatching { showSession(file, old, state.pageIndex) } }
+            fail(OPEN_FAILED)
+            return
+        }
+        runCatching { session?.close() }
+        session = next
+        pendingEdit = null
+        state = state.copy(
+            busy = null,
+            hasDocument = true,
+            fileName = name,
+            documentToken = state.documentToken + 1,
+            editing = null,
+            draft = null,
+            outline = null,
+            fontWarning = null,
+        )
+        syncHistory()
     }
 
     fun showPage(index: Int) {
-        val doc = document ?: return
-        if (index < 0 || index >= doc.numberOfPages || index == state.pageIndex) return
+        if (busy || session == null || index !in geometry.indices || index == state.pageIndex) return
+        state = state.copy(busy = BUSY_PAGE, outline = null)
         viewModelScope.launch {
-            state = state.copy(busy = "Loading page")
-            renderPage(index)
-            state = state.copy(busy = null, pageIndex = index)
-        }
-    }
-
-    fun select(id: Int?, reveal: Boolean = false) {
-        state = state.copy(
-            selectedId = id,
-            revealTick = if (reveal) state.revealTick + 1 else state.revealTick,
-        )
-    }
-
-    fun copySelectedText(context: Context) {
-        val node = findNode(parsed?.root ?: return, state.selectedId) ?: return
-        val text = node.text ?: return
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("PDF text", text))
-        Toast.makeText(context, "Copied text", Toast.LENGTH_SHORT).show()
-    }
-
-    fun toggleExpand(id: Int) {
-        val e = state.expanded
-        state = state.copy(expanded = if (id in e) e - id else e + id)
-    }
-
-    fun toggleRaw() {
-        state = state.copy(showRaw = !state.showRaw)
-    }
-
-    fun deleteSelected() {
-        val doc = document ?: return
-        val parsedPage = parsed ?: return
-        val node = findNode(parsedPage.root, state.selectedId) ?: return
-        val pageIndex = state.pageIndex
-        viewModelScope.launch {
-            state = state.copy(busy = "Deleting")
-            withContext(Dispatchers.IO) {
-                recordUndo(doc, pageIndex)
-                ElementEditor.deleteRange(
-                    doc, doc.getPage(pageIndex), parsedPage.tokens,
-                    node.startIndex, node.endIndex,
-                )
+            try {
+                renderPage(index)
+                state = state.copy(busy = null)
+            } catch (t: Throwable) {
+                Log.e(TAG, "render failed", t)
+                fail(SOMETHING_WRONG)
             }
-            resyncCacheAndReopen()
-            renderPage(pageIndex)
-            state = state.copy(busy = null, dirty = true, canUndo = true, canRedo = false)
         }
     }
 
-    fun beginEdit(id: Int) {
-        state = state.copy(selectedId = id, editingId = id)
+    /** A tap at PDF user-space point ([pageX], [pageY]) of the shown page. */
+    fun tap(pageX: Float, pageY: Float) {
+        val s = session ?: return
+        if (busy || state.editing != null) return
+        val page = state.pageIndex
+        viewModelScope.launch {
+            val hit = try {
+                withContext(Dispatchers.IO) { s.paragraphAt(page, pageX, pageY) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "hit test failed", t)
+                null
+            }
+            if (hit == null || session !== s || state.pageIndex != page || busy) {
+                state = state.copy(outline = null)
+                return@launch
+            }
+            state = state.copy(outline = geometry.getOrNull(page)?.transform?.toRect(hit.bounds))
+            if (!hit.editable) {
+                state = state.copy(message = rejectMessage(hit.reason ?: RejectReason.NON_LATIN, ""))
+                return@launch
+            }
+            delay(OUTLINE_MS) // let the outline show before the sheet covers the page
+            if (session === s && !busy && state.editing == null) state = state.copy(editing = hit, draft = null)
+        }
     }
 
     fun cancelEdit() {
-        state = state.copy(editingId = null)
+        pendingEdit = null
+        state = state.copy(editing = null, draft = null, outline = null, fontWarning = null)
     }
 
-    fun editTarget(): EditTarget? {
-        val parsedPage = parsed ?: return null
-        val node = findNode(parsedPage.root, state.editingId ?: return null) ?: return null
-        val caps = ElementEditor.capabilities(parsedPage.tokens, node)
-        val b = node.bounds
-        return EditTarget(
-            node = node,
-            caps = caps,
-            x = b?.minX ?: 0f,
-            y = b?.minY ?: 0f,
-            w = b?.width ?: 0f,
-            h = b?.height ?: 0f,
-            fillArgb = if (caps.canFill) state.swatchColors[node.id] ?: node.colorArgb else null,
-            strokeArgb = if (caps.canStroke) node.colorArgb else null,
-            text = if (caps.canText) node.text else null,
-            colorSpace = node.colorSpace,
-            fontOptions = if (caps.canText) fontCatalog?.options() ?: emptyList() else emptyList(),
-        )
+    fun submitParagraph(newText: String) {
+        val hit = state.editing ?: return
+        state = state.copy(draft = newText)
+        runOp(EditOp.EditParagraph(hit.id, newText), accept = false)
     }
 
-    fun applyEdit(context: Context, request: EditRequest) {
-        val node = findNode(parsed?.root ?: return, state.editingId) ?: return
-        applyEditInternal(context, node, request)
+    fun confirmSubstitution() {
+        val op = pendingEdit ?: return
+        pendingEdit = null
+        state = state.copy(fontWarning = null)
+        runOp(op, accept = true)
     }
 
-    // Inline canvas editing: retype one text run in place. Always routes through
-    // the auto fallback so the new characters are guaranteed to encode, matching
-    // the edit sheet's default.
-    fun applyInlineText(context: Context, id: Int, newText: String) {
-        val node = findNode(parsed?.root ?: return, id) ?: return
-        if (node.kind != NodeKind.TEXT) return
-        if (newText == (node.text ?: "")) return
-        applyEditInternal(
-            context, node, EditRequest(newText = newText, fontEntryId = AUTO_FONT_ID),
-        )
+    fun cancelSubstitution() {
+        pendingEdit = null
+        state = state.copy(fontWarning = null)
     }
 
-    // The fallback face the inline editor renders while typing, matching what
-    // applyInlineText embeds (the auto match for the run's own font).
-    fun inlineFontFace(id: Int): FontCatalog.FaceSource? {
-        val node = findNode(parsed?.root ?: return null, id) ?: return null
-        return fontCatalog?.autoMatchFace(node.font)
+    fun addPageBefore(i: Int) = runOp(EditOp.AddBlankPage(i), showAfter = i)
+
+    fun addPageAfter(i: Int) = runOp(EditOp.AddBlankPage(i + 1), showAfter = i + 1)
+
+    fun deleteCurrentPage() = runOp(EditOp.DeletePage(state.pageIndex), showAfter = state.pageIndex)
+
+    fun dismissMessage() {
+        state = state.copy(message = null, outline = if (state.editing == null) null else state.outline)
     }
 
-    // For the debug overlay: which matcher step picked the run's substitute.
-    fun fontDecisionFor(id: Int): FontCatalog.MatchExplain? {
-        val node = findNode(parsed?.root ?: return null, id) ?: return null
-        if (node.kind != NodeKind.TEXT) return null
-        return fontCatalog?.explainMatch(node.font)
-    }
-
-    // Width scale the inline editor applies so its preview size tracks what the
-    // commit embeds (both use the auto match for the run's own font).
-    fun inlineFontScale(id: Int): Float {
-        val node = findNode(parsed?.root ?: return 1f, id) ?: return 1f
-        val cat = fontCatalog ?: return 1f
-        val matchId = cat.autoMatchId(node.font) ?: return 1f
-        return cat.widthScale(node.font, matchId)
-    }
-
-    private fun applyEditInternal(context: Context, node: DrawNode, request: EditRequest) {
-        val doc = document ?: return
-        val parsedPage = parsed ?: return
-        val pageIndex = state.pageIndex
+    /** Applies [op]; on success re-renders and shows page [showAfter] (clamped), or else the current page. */
+    private fun runOp(op: EditOp, accept: Boolean = false, showAfter: Int? = null) {
+        val s = session ?: return
+        if (busy) return
+        state = state.copy(busy = BUSY_UPDATING)
         viewModelScope.launch {
-            // editElement is cheap and may reject; do it first so a failed edit
-            // keeps the sheet open with the user's input. Only the slow resync +
-            // render is overlaid, and the sheet closes the instant it starts.
-            val result = withContext(Dispatchers.IO) {
-                val page = doc.getPage(pageIndex)
-                val before = ElementEditor.snapshot(page) ?: ByteArray(0)
-                val sub = resolveSubstitute(doc, node, request)
-                val r = ElementEditor.editElement(
-                    doc, page, parsedPage.tokens, node, request, sub?.font, sub?.scale ?: 1f,
-                )
-                if (r is EditResult.Applied) {
-                    pushUndo(pageIndex, before)
-                    if (sub != null) embeddedFonts = true
-                }
-                r
+            val outcome = try {
+                withContext(Dispatchers.IO) { s.apply(op, accept) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "apply failed", t)
+                fail(SOMETHING_WRONG)
+                return@launch
             }
-            when (result) {
-                is EditResult.Applied -> {
-                    state = state.copy(editingId = null, busy = "Applying edits")
-                    resyncCacheAndReopen()
-                    renderPage(pageIndex)
-                    state = state.copy(
-                        busy = null, dirty = true, canUndo = true, canRedo = false,
-                    )
+            when (outcome) {
+                EditOutcome.Applied -> {
+                    if (!refreshAfterChange(s, showAfter ?: state.pageIndex) { s.undo() }) return@launch
+                    state = state.copy(busy = null, editing = null, draft = null, outline = null)
+                    syncHistory()
                 }
-                is EditResult.TextEncodeFailed -> {
-                    val chars = result.chars
-                    val msg = if (chars.isNullOrBlank()) {
-                        "This font cannot encode that text"
-                    } else {
-                        "This font lacks: $chars"
-                    }
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                is EditOutcome.NeedsFontConfirmation -> {
+                    pendingEdit = op as? EditOp.EditParagraph
+                    state = state.copy(busy = null, fontWarning = outcome.warning)
                 }
-                EditResult.Degenerate ->
-                    Toast.makeText(context, "Cannot transform this element", Toast.LENGTH_SHORT).show()
-                EditResult.NoChange -> state = state.copy(editingId = null)
+                is EditOutcome.Rejected ->
+                    state = state.copy(busy = null, message = rejectMessage(outcome.reason, outcome.detail))
             }
         }
     }
 
-    private class Substitute(val font: PDFont, val scale: Float)
+    fun undo() = step(forward = false)
 
-    // Prefer-confident policy: on a text edit with no explicit pick, swap to a
-    // precisely identified metric-compatible font even when the original could
-    // encode, so missing glyphs and unreliable embedded widths stop biting.
-    private fun resolveSubstitute(doc: PDDocument, node: DrawNode, request: EditRequest): Substitute? {
-        val cat = fontCatalog ?: return null
-        val id = request.fontEntryId
-        val realId = when {
-            id == AUTO_FONT_ID -> cat.autoMatchId(node.font)
-            id != null -> id
-            request.newText != null -> cat.confidentMatchId(node.font)
-            else -> null
-        } ?: return null
-        val font = cat.resolve(doc, realId) ?: return null
-        return Substitute(font, cat.widthScale(node.font, realId))
-    }
+    fun redo() = step(forward = true)
 
-    fun importFont(context: Context, uri: Uri) {
-        val cat = fontCatalog
-        if (cat == null) {
-            Toast.makeText(context, "Open a document first", Toast.LENGTH_SHORT).show()
-            return
-        }
+    private fun step(forward: Boolean) {
+        val s = session ?: return
+        if (busy || !(if (forward) s.canRedo else s.canUndo)) return
+        state = state.copy(busy = BUSY_UPDATING, editing = null, draft = null, outline = null)
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { cat.importFont(uri) }
-            if (ok) {
-                state = state.copy(fontCatalogTick = state.fontCatalogTick + 1)
-                Toast.makeText(context, "Font added", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(context, "Could not import that font", Toast.LENGTH_SHORT).show()
+            try {
+                withContext(Dispatchers.IO) { if (forward) s.redo() else s.undo() }
+            } catch (t: Throwable) {
+                Log.e(TAG, "undo/redo failed", t)
+                fail(SOMETHING_WRONG)
+                return@launch
             }
+            if (!refreshAfterChange(s, state.pageIndex) { if (forward) s.undo() else s.redo() }) return@launch
+            state = state.copy(busy = null)
+            syncHistory()
         }
     }
 
-    fun undo() = stepHistory(undoStack, redoStack)
-
-    fun redo() = stepHistory(redoStack, undoStack)
-
-    private fun stepHistory(from: ArrayDeque<EditSnapshot>, to: ArrayDeque<EditSnapshot>) {
-        val doc = document ?: return
-        if (from.isEmpty()) return
-        viewModelScope.launch {
-            state = state.copy(busy = "Working")
-            val entry = from.removeLast()
-            historyBytes -= entry.content.size
-            val pageIndex = entry.pageIndex
-            withContext(Dispatchers.IO) {
-                val page = doc.getPage(pageIndex)
-                val current = ElementEditor.snapshot(page) ?: ByteArray(0)
-                to.addLast(EditSnapshot(pageIndex, current))
-                historyBytes += current.size
-                ElementEditor.restore(doc, page, entry.content)
-            }
-            resyncCacheAndReopen()
-            renderPage(pageIndex)
-            state = state.copy(
-                busy = null,
-                pageIndex = pageIndex,
-                dirty = true,
-                canUndo = undoStack.isNotEmpty(),
-                canRedo = redoStack.isNotEmpty(),
-            )
+    /**
+     * Shows the session's new state at [page] (clamped). If that fails, [revert] restores the previous session
+     * state, which is put back on screen, and the failure message is shown. Returns whether the new state is shown.
+     */
+    private suspend fun refreshAfterChange(s: EditSession, page: Int, revert: () -> Unit): Boolean {
+        val file = cacheFile ?: return false
+        val ok = try {
+            showSession(file, s, page)
+        } catch (t: Throwable) {
+            Log.e(TAG, "refresh failed", t)
+            false
         }
-    }
-
-    private fun recordUndo(doc: PDDocument, pageIndex: Int) {
-        pushUndo(pageIndex, ElementEditor.snapshot(doc.getPage(pageIndex)) ?: ByteArray(0))
-    }
-
-    // Capped both ways so history never grows without bound.
-    private fun pushUndo(pageIndex: Int, content: ByteArray) {
-        undoStack.addLast(EditSnapshot(pageIndex, content))
-        historyBytes += content.size
-        for (e in redoStack) historyBytes -= e.content.size
-        redoStack.clear()
-        while (undoStack.size > MAX_HISTORY || historyBytes > MAX_HISTORY_BYTES) {
-            if (undoStack.size <= 1) break
-            historyBytes -= undoStack.removeFirst().content.size
+        if (!ok) {
+            runCatching { withContext(Dispatchers.IO) { revert() } }
+            runCatching { showSession(file, s, state.pageIndex) }
+            syncHistory()
+            fail(SOMETHING_WRONG)
         }
-    }
-
-    private fun clearHistory() {
-        undoStack.clear()
-        redoStack.clear()
-        historyBytes = 0
+        return ok
     }
 
     fun saveCopy(context: Context, uri: Uri) {
-        val doc = document ?: return
+        val s = session ?: return
+        if (busy) return
+        val app = context.applicationContext
+        state = state.copy(busy = BUSY_SAVING)
         viewModelScope.launch {
-            state = state.copy(busy = "Saving")
-            try {
+            val ok = try {
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(uri)?.use { doc.save(it) }
+                    app.contentResolver.openOutputStream(uri, "wt")?.use { s.save(it); true } ?: false
                 }
-                state = state.copy(dirty = false)
-                Toast.makeText(context, "Saved a copy", Toast.LENGTH_SHORT).show()
             } catch (t: Throwable) {
                 Log.e(TAG, "save failed", t)
-                Toast.makeText(context, "Failed to save", Toast.LENGTH_LONG).show()
-            } finally {
+                false
+            }
+            if (ok) {
                 state = state.copy(busy = null)
+                Toast.makeText(app, "Saved a copy", Toast.LENGTH_SHORT).show()
+            } else {
+                fail(SOMETHING_WRONG)
             }
         }
     }
 
-    fun closeDocument() {
-        closeRenderer()
-        document?.close()
-        document = null
-        parsed = null
-        clearHistory()
-        runCatching { cacheFile?.delete() }
-        cacheFile = null
-        fontCatalog = null
-        embeddedFonts = false
-        state = PdfUiState()
+    /** A file name for the saved copy: "letter.pdf" becomes "letter (edited).pdf". */
+    fun suggestedCopyName(): String {
+        val name = state.fileName.ifBlank { "document.pdf" }
+        val base = if (name.endsWith(".pdf", ignoreCase = true)) name.dropLast(4) else name
+        return "$base (edited).pdf"
+    }
+
+    private fun fail(message: String) {
+        state = state.copy(busy = null, message = message)
+    }
+
+    private fun syncHistory() {
+        val s = session
+        state = state.copy(canUndo = s?.canUndo == true, canRedo = s?.canRedo == true)
+    }
+
+    private fun rejectMessage(reason: RejectReason, detail: String): String = when (reason) {
+        RejectReason.NON_LATIN -> "Editing this language isn't supported yet."
+        RejectReason.UNSUPPORTED_CHARS -> "These characters can't be added: ${spacedChars(detail)}"
+        RejectReason.NO_ROOM -> "There's no room to make this text longer here. Please shorten it."
+        RejectReason.LAST_PAGE -> "A document needs at least one page."
+        RejectReason.NOT_FOUND -> SOMETHING_WRONG
+    }
+
+    // ---- display ----
+
+    /**
+     * Writes the session's rendered bytes to [file], reopens the renderer on them and renders [page] (clamped).
+     * Returns false when the bytes have no pages.
+     */
+    private suspend fun showSession(file: File, s: EditSession, page: Int): Boolean {
+        renderMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val bytes = s.renderedBytes()
+                closeDisplay()
+                geometry = emptyList()
+                file.writeBytes(bytes)
+                val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                pfd = fd
+                pdfRenderer = PdfRenderer(fd)
+                val doc = PDDocument.load(file).also { displayDoc = it }
+                val scale = RENDER_DPI / 72f
+                geometry = (0 until doc.numberOfPages).map { i ->
+                    val p = doc.getPage(i)
+                    val crop = p.cropBox
+                    PageGeometry(
+                        rotation = ((p.rotation % 360) + 360) % 360,
+                        widthPt = crop.width,
+                        heightPt = crop.height,
+                        transform = PageTransform(
+                            crop.lowerLeftX, crop.lowerLeftY, crop.width, crop.height, p.rotation, scale,
+                        ),
+                    )
+                }
+            }
+        }
+        if (geometry.isEmpty()) return false
+        renderPage(page.coerceIn(0, geometry.lastIndex))
+        return true
     }
 
     private suspend fun renderPage(index: Int) {
-        val doc = document ?: return
-        try {
-            val result = withContext(Dispatchers.IO) {
-                val page = doc.getPage(index)
-                val crop = page.cropBox
-                val scale = RENDER_DPI / 72f
-                val rot = ((page.rotation % 360) + 360) % 360
-                val baseW = Math.round(crop.width * scale)
-                val baseH = Math.round(crop.height * scale)
-                val pxW = if (rot == 90 || rot == 270) baseH else baseW
-                val pxH = if (rot == 90 || rot == 270) baseW else baseH
-                val bmp = renderPageBitmap(index, pxW, pxH)
-                val parsedPage = ContentStreamEngine.parse(page)
-                val transform = PageTransform(
-                    crop.lowerLeftX, crop.lowerLeftY, crop.width, crop.height,
-                    page.rotation, scale,
-                )
-                Triple(bmp, parsedPage, transform)
-            }
-            parsed = result.second
-            state = state.copy(
-                bitmap = result.first.asImageBitmap(),
-                elementCount = result.second.leaves.size,
-                page = result.second,
-                pageTransform = result.third,
-                swatchColors = sampleLeafColors(result.first, result.second.leaves, result.third),
-                selectedId = null,
-                expanded = collectGroupIds(result.second.root),
-            )
-        } catch (t: Throwable) {
-            Log.e(TAG, "render failed page=$index", t)
-            state = state.copy(error = t.message ?: "Failed to render page")
+        val g = geometry[index]
+        val bmp = withContext(Dispatchers.IO) {
+            val scale = RENDER_DPI / 72f
+            val baseW = Math.round(g.widthPt * scale)
+            val baseH = Math.round(g.heightPt * scale)
+            val sideways = g.rotation == 90 || g.rotation == 270
+            renderPageBitmap(index, if (sideways) baseH else baseW, if (sideways) baseW else baseH)
         }
-    }
-
-    // pdfbox-android can't resolve some color spaces (Separation, etc.), so the
-    // true paint color is read from the pixel pdfium actually drew at the
-    // element's center. Text keeps its parsed color (glyph centers are usually
-    // background).
-    private fun sampleLeafColors(
-        bmp: Bitmap,
-        leaves: List<DrawNode>,
-        t: PageTransform,
-    ): Map<Int, Int> {
-        val map = HashMap<Int, Int>()
-        val w = bmp.width
-        val h = bmp.height
-        for (leaf in leaves) {
-            if (leaf.kind != NodeKind.PATH && leaf.kind != NodeKind.IMAGE) continue
-            val b = leaf.bounds ?: continue
-            val r = t.toRect(b)
-            val cx = ((r.left + r.right) * 0.5f).toInt().coerceIn(0, w - 1)
-            val cy = ((r.top + r.bottom) * 0.5f).toInt().coerceIn(0, h - 1)
-            val px = bmp.getPixel(cx, cy)
-            if (px ushr 24 != 0) map[leaf.id] = px or (0xFF shl 24)
-        }
-        return map
+        state = state.copy(
+            bitmap = bmp.asImageBitmap(),
+            pageIndex = index,
+            pageCount = geometry.size,
+            pageTransform = g.transform,
+        )
     }
 
     private suspend fun renderPageBitmap(index: Int, pxW: Int, pxH: Int): Bitmap =
@@ -452,7 +367,7 @@ class PdfDocumentViewModel : ViewModel() {
             renderWithPdfium(index, pxW, pxH)
         } catch (t: Throwable) {
             Log.e(TAG, "pdfium render failed page=$index, falling back to pdfbox", t)
-            PDFRenderer(requireNotNull(document)).renderImageWithDPI(index, RENDER_DPI)
+            renderMutex.withLock { PDFRenderer(requireNotNull(displayDoc)).renderImageWithDPI(index, RENDER_DPI) }
         }
 
     // pdfium leaves empty pixels transparent and PDFs assume white paper, so
@@ -484,16 +399,14 @@ class PdfDocumentViewModel : ViewModel() {
         outW: Int,
         outH: Int,
     ): Bitmap? {
-        val doc = document ?: return null
-        if (pageIndex < 0 || pageIndex >= doc.numberOfPages) return null
+        val g = geometry.getOrNull(pageIndex) ?: return null
+        if (g.rotation != 0) return null
         val bw = right - left
         val bh = bottom - top
         if (bw < 1f || bh < 1f) return null
         val w = outW.coerceIn(1, MAX_TILE_PX)
         val h = outH.coerceIn(1, MAX_TILE_PX)
         return withContext(Dispatchers.IO) {
-            val page = doc.getPage(pageIndex)
-            if (((page.rotation % 360) + 360) % 360 != 0) return@withContext null
             val s = RENDER_DPI / 72f
             val matrix = Matrix().apply {
                 setScale((w / bw) * s, (h / bh) * s)
@@ -501,6 +414,7 @@ class PdfDocumentViewModel : ViewModel() {
             }
             renderMutex.withLock {
                 val renderer = pdfRenderer ?: return@withLock null
+                if (pageIndex >= renderer.pageCount) return@withLock null
                 val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 bmp.eraseColor(Color.WHITE)
                 val pdfPage = renderer.openPage(pageIndex)
@@ -514,43 +428,13 @@ class PdfDocumentViewModel : ViewModel() {
         }
     }
 
-    private fun openRenderer(file: File) {
-        val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        pfd = fd
-        pdfRenderer = PdfRenderer(fd)
-    }
-
-    private fun closeRenderer() {
+    private fun closeDisplay() {
         runCatching { pdfRenderer?.close() }
         runCatching { pfd?.close() }
+        runCatching { displayDoc?.close() }
         pdfRenderer = null
         pfd = null
-    }
-
-    // After an in-memory edit the cache file is stale; rewrite it and reopen
-    // pdfium on the fresh bytes. saveIncremental appends only the changed objects
-    // to the original, so editing one page skips re-serializing the whole doc.
-    // Once a font is embedded the increment can't reach the new font objects
-    // (commit only flags the page chain), so switch to full saves from then on.
-    private suspend fun resyncCacheAndReopen() {
-        val doc = document ?: return
-        val file = cacheFile ?: return
-        renderMutex.withLock {
-            closeRenderer()
-            withContext(Dispatchers.IO) {
-                try {
-                    if (embeddedFonts) {
-                        file.outputStream().use { doc.save(it) }
-                    } else {
-                        file.outputStream().use { doc.saveIncremental(it) }
-                    }
-                } catch (t: Throwable) {
-                    Log.w(TAG, "incremental save failed, full save", t)
-                    file.outputStream().use { doc.save(it) }
-                }
-            }
-            openRenderer(file)
-        }
+        displayDoc = null
     }
 
     private fun displayName(context: Context, uri: Uri): String {
@@ -562,59 +446,50 @@ class PdfDocumentViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        closeRenderer()
-        document?.close()
-        document = null
+        closeDisplay()
+        runCatching { session?.close() }
+        session = null
         runCatching { cacheFile?.delete() }
         cacheFile = null
     }
 
+    private class PageGeometry(val rotation: Int, val widthPt: Float, val heightPt: Float, val transform: PageTransform)
+
     companion object {
         const val RENDER_DPI = 144f
         private const val MAX_TILE_PX = 4096
-        private const val TAG = "PdfInspector"
-        private const val MAX_HISTORY = 50
-        private const val MAX_HISTORY_BYTES = 16L * 1024 * 1024
+        private const val OUTLINE_MS = 250L
+        private const val TAG = "PdfEditor"
+        private const val CACHE_NAME = "working.pdf"
+
+        private const val BUSY_OPENING = "Opening…"
+        private const val BUSY_PAGE = "Loading page…"
+        private const val BUSY_UPDATING = "Updating…"
+        private const val BUSY_SAVING = "Saving…"
+
+        const val SOMETHING_WRONG = "Something went wrong. Your document wasn't changed."
+        private const val OPEN_FAILED = "This file couldn't be opened as a PDF."
+        private const val PASSWORD = "This PDF is password-protected."
     }
 }
 
-private class EditSnapshot(val pageIndex: Int, val content: ByteArray)
-
-class EditTarget(
-    val node: DrawNode,
-    val caps: EditCaps,
-    val x: Float,
-    val y: Float,
-    val w: Float,
-    val h: Float,
-    val fillArgb: Int?,
-    val strokeArgb: Int?,
-    val text: String?,
-    val colorSpace: String?,
-    val fontOptions: List<FontOption> = emptyList(),
-)
-
 data class PdfUiState(
-    val loading: Boolean = false,
     val busy: String? = null,
     val hasDocument: Boolean = false,
     val bitmap: ImageBitmap? = null,
     val pageIndex: Int = 0,
     val pageCount: Int = 0,
-    val elementCount: Int = 0,
     val fileName: String = "",
-    val page: ParsedPage? = null,
     val pageTransform: PageTransform? = null,
-    val selectedId: Int? = null,
-    val editingId: Int? = null,
-    val swatchColors: Map<Int, Int> = emptyMap(),
-    val revealTick: Int = 0,
-    val expanded: Set<Int> = emptySet(),
-    val showRaw: Boolean = false,
-    val dirty: Boolean = false,
+    val documentToken: Int = 0,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
-    val documentToken: Int = 0,
-    val fontCatalogTick: Int = 0,
-    val error: String? = null,
+    /** The paragraph whose edit sheet is open. */
+    val editing: ParagraphHit? = null,
+    /** What the user last submitted for [editing], kept so the sheet reopens with it after a dialog. */
+    val draft: String? = null,
+    /** The tapped paragraph's bounds in bitmap pixels. */
+    val outline: Rect? = null,
+    val fontWarning: FontWarning? = null,
+    val message: String? = null,
 )

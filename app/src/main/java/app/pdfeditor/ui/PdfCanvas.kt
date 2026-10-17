@@ -13,7 +13,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -29,7 +28,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 
-data class LeafRect(val id: Int, val rect: Rect)
+enum class FitMode { NONE, WIDTH }
 
 private data class SharpTile(val image: ImageBitmap, val src: Rect)
 
@@ -38,24 +37,22 @@ private const val MAX_SCALE = 12f
 private const val MAX_TILE_PX = 4096
 private const val SETTLE_MS = 150L
 
+/**
+ * The rendered page with pinch zoom and pan. [outline] (bitmap pixels) is drawn over the page; a tap reports the
+ * bitmap pixel under the finger.
+ */
 @Composable
 fun PdfCanvas(
     bitmap: ImageBitmap,
     pageIndex: Int,
     scaleState: MutableState<Float>,
     offsetState: MutableState<Offset>,
-    leaves: List<LeafRect>,
-    selectedRect: Rect?,
+    outline: Rect?,
     highlightColor: Color,
     backdropColor: Color,
-    runBoxes: List<LeafRect>,
-    editingRunId: Int?,
-    textBoxColor: Color,
-    onEditRun: (Int) -> Unit,
-    debugRows: List<Pair<String, String>> = emptyList(),
     fitMode: FitMode,
     onUserTransform: () -> Unit,
-    onSelect: (Int?) -> Unit,
+    onTap: (Offset) -> Unit,
     renderTile: (suspend (pageIndex: Int, src: Rect, outW: Int, outH: Int) -> ImageBitmap?)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -63,20 +60,9 @@ fun PdfCanvas(
         val viewportW = constraints.maxWidth.toFloat()
         val viewportH = constraints.maxHeight.toFloat()
 
-        // Hoisted by the caller so zoom/pan survive the canvas moving between the
-        // docked and transparent layout branches.
         var scale by scaleState
         var offset by offsetState
         var sharpTile by remember { mutableStateOf<SharpTile?>(null) }
-
-        var showDebug by remember { mutableStateOf(false) }
-        var mem by remember { mutableStateOf(MemStats(0, 0, 0)) }
-        LaunchedEffect(showDebug) {
-            while (showDebug) {
-                mem = readMemStats()
-                delay(1000)
-            }
-        }
 
         fun fitWidth() {
             if (viewportW > 0f && bitmap.width > 0) {
@@ -86,21 +72,9 @@ fun PdfCanvas(
             }
         }
 
-        fun fitHeight() {
-            if (viewportH > 0f && bitmap.height > 0) {
-                val s = viewportH / bitmap.height
-                scale = s
-                offset = Offset(((viewportW - bitmap.width * s) / 2f).coerceAtLeast(0f), 0f)
-            }
-        }
-
         // Global zoom: kept across pages; only re-fit while a fit mode is active.
         LaunchedEffect(bitmap, viewportW, viewportH, fitMode) {
-            when (fitMode) {
-                FitMode.WIDTH -> fitWidth()
-                FitMode.HEIGHT -> fitHeight()
-                FitMode.NONE -> Unit
-            }
+            if (fitMode == FitMode.WIDTH) fitWidth()
         }
 
         // Once a zoom/pan settles, re-render the visible window crisply. The base
@@ -133,10 +107,6 @@ fun PdfCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .fourFingerTap {
-                    showDebug = !showDebug
-                    android.util.Log.d("DebugHud", "toggle=$showDebug")
-                }
                 .pointerInput(bitmap) {
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         if (zoom != 1f || pan != Offset.Zero) onUserTransform()
@@ -145,16 +115,9 @@ fun PdfCanvas(
                         scale = newScale
                     }
                 }
-                .pointerInput(bitmap, leaves, runBoxes) {
+                .pointerInput(bitmap) {
                     detectTapGestures { tap ->
-                        val point = Offset((tap.x - offset.x) / scale, (tap.y - offset.y) / scale)
-                        val run = runBoxes.lastOrNull { it.rect.contains(point) }
-                        if (run != null) {
-                            onEditRun(run.id)
-                        } else {
-                            val hit = leaves.lastOrNull { it.rect.contains(point) }
-                            onSelect(hit?.id)
-                        }
+                        onTap(Offset((tap.x - offset.x) / scale, (tap.y - offset.y) / scale))
                     }
                 },
         ) {
@@ -184,38 +147,18 @@ fun PdfCanvas(
                         )
                     }
                 }
-                val runStroke = (1f / scale).coerceAtLeast(0.4f)
-                for (rb in runBoxes) {
-                    if (rb.id == editingRunId) continue
-                    drawRect(color = textBoxColor.copy(alpha = 0.06f), topLeft = rb.rect.topLeft, size = rb.rect.size)
-                    drawRect(
-                        color = textBoxColor.copy(alpha = 0.5f),
-                        topLeft = rb.rect.topLeft,
-                        size = rb.rect.size,
-                        style = Stroke(width = runStroke),
-                    )
-                }
-                selectedRect?.let { r ->
-                    drawRect(color = highlightColor.copy(alpha = 0.18f), topLeft = r.topLeft, size = r.size)
+                outline?.let { r ->
+                    val pad = 4f
+                    val box = Rect(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)
+                    drawRect(color = highlightColor.copy(alpha = 0.12f), topLeft = box.topLeft, size = box.size)
                     drawRect(
                         color = highlightColor,
-                        topLeft = r.topLeft,
-                        size = r.size,
+                        topLeft = box.topLeft,
+                        size = box.size,
                         style = Stroke(width = 2f / scale),
                     )
                 }
             }
-        }
-
-        if (showDebug) {
-            DebugOverlay(
-                bitmap = bitmap,
-                scale = scale,
-                mem = mem,
-                tilePx = sharpTile?.let { IntSize(it.image.width, it.image.height) },
-                extraRows = debugRows,
-                modifier = Modifier.align(Alignment.TopStart),
-            )
         }
     }
 }

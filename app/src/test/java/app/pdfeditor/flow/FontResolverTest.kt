@@ -59,4 +59,9 @@ class FontResolverTest {
     @Test fun tabBecomesSpace() {
         assertTrue(plan("a\tb") is FontPlanResult.Ok)
     }
+
+    @Test fun newlineIsALineBreakNotAGlyph() {
+        val r = plan("Date: 17\nOctober 2026") as FontPlanResult.Ok
+        assertNull(r.plan.warning)
+    }
 }

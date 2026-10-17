@@ -27,28 +27,6 @@ class ContentStreamEngineTest {
     }
 
     @Test
-    fun deletingTextRewritesTheStream() {
-        val doc = PDDocument.load(samplePdf())
-        val page = doc.getPage(0)
-        val parsed = ContentStreamEngine.parse(page)
-        val text = parsed.leaves.first { it.kind == NodeKind.TEXT }
-
-        val kept = ElementEditor.deleteRange(
-            doc, page, parsed.tokens, text.startIndex, text.endIndex,
-        )
-        assertTrue("tokens should shrink", kept.size < parsed.tokens.size)
-
-        val reparsed = ContentStreamEngine.parse(page)
-        val stillThere = reparsed.leaves.any {
-            it.kind == NodeKind.TEXT && it.label.contains("Hello World")
-        }
-        assertTrue("deleted text should be gone after re-parse", !stillThere)
-        assertTrue("the path should survive", reparsed.leaves.any { it.kind == NodeKind.PATH })
-
-        doc.close()
-    }
-
-    @Test
     fun textRunCarriesFontResourceAndSize() {
         val doc = PDDocument.load(samplePdf())
         val parsed = ContentStreamEngine.parse(doc.getPage(0))

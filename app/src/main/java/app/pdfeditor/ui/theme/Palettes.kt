@@ -113,6 +113,4 @@ object Palettes {
             inversePrimary = r.inversePrimary,
         )
     }
-
-    fun swatch(accent: Accent): Color = rolesFor(accent, false).primary
 }
