@@ -11,3 +11,6 @@ build/
 *.apk
 *.keystore
 /keystore.properties
+
+.superpowers/
+local.properties
