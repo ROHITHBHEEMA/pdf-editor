@@ -499,4 +499,30 @@ class EditSessionTest {
             }
         }
     }
+
+    // ---- final fix 8: tapping text that can't be edited ----
+
+    @Test fun headerTextIsFoundButNotEditable() {
+        bytes = PDDocument().use { doc ->
+            val f = PdfFixtures.font(doc)
+            for (n in 0..1) {
+                val pg = com.tom_roush.pdfbox.pdmodel.PDPage(com.tom_roush.pdfbox.pdmodel.common.PDRectangle.A4).also { doc.addPage(it) }
+                com.tom_roush.pdfbox.pdmodel.PDPageContentStream(doc, pg).use { cs ->
+                    for ((t, y) in listOf("Riverside Trust" to pg.mediaBox.height - 40f, (if (n == 0) "Body paragraph text here." else "Other body text.") to 700f)) {
+                        cs.beginText(); cs.setFont(f, 11f); cs.newLineAtOffset(72f, y); cs.showText(t); cs.endText()
+                    }
+                }
+            }
+            ByteArrayOutputStream().also { doc.save(it) }.toByteArray()
+        }
+        val headerY = com.tom_roush.pdfbox.pdmodel.common.PDRectangle.A4.height - 40f + 3f
+        assertNull(s.paragraphAt(0, 80f, headerY))
+        assertTrue(s.uneditableTextAt(0, 80f, headerY))
+        assertFalse(s.uneditableTextAt(0, 500f, 400f)) // empty space
+        val bodyY = originY(bytes, "Body paragraph text here.") + 3f
+        assertNotNull(s.paragraphAt(0, 80f, bodyY)); assertFalse(s.uneditableTextAt(0, 80f, bodyY))
+        s.apply(AddBlankPage(0))
+        assertFalse(s.uneditableTextAt(0, 80f, headerY)) // the blank page has no text
+        assertTrue(s.uneditableTextAt(1, 80f, headerY))
+    }
 }

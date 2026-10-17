@@ -1,6 +1,8 @@
 package app.pdfeditor.flow
 
 import app.pdfeditor.engine.Bounds
+import app.pdfeditor.engine.DrawNode
+import app.pdfeditor.engine.NodeKind
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import java.io.Closeable
@@ -328,6 +330,26 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
             par.id, currentSpans(par).joinToString("") { it.text }, page, bounds,
             editable = notEditable(par) == null, reason = notEditable(par),
         )
+    }
+
+    /**
+     * True when (x, y) on output page [page] is over text that no paragraph covers: headers and footers, text
+     * inside form objects and other text kept fixed on its original page. Moved body text never counts here.
+     */
+    fun uneditableTextAt(page: Int, x: Float, y: Float): Boolean {
+        val slot = flow().result.slots.getOrNull(page)?.slot as? PageSlot.Original ?: return false
+        val pa = m.analysis.pages[slot.index]
+        val body: MutableSet<DrawNode> = java.util.Collections.newSetFromMap(java.util.IdentityHashMap())
+        pa.blocks.forEach { body += it.runNodes }
+        fun over(b: Bounds?) = b != null && b.isValid &&
+            x >= b.minX - HIT_SLACK && x <= b.maxX + HIT_SLACK && y >= b.minY - HIT_SLACK && y <= b.maxY + HIT_SLACK
+        fun hasRun(n: DrawNode): Boolean = n.run != null || n.children.any(::hasRun)
+        fun walk(n: DrawNode): Boolean = when {
+            n.run != null -> n !in body && over(n.bounds)
+            n.kind == NodeKind.TEXT && !hasRun(n) -> over(n.bounds)
+            else -> n.children.any(::walk)
+        }
+        return walk(pa.parsed.root)
     }
 
     /** Releases the analysis document. */

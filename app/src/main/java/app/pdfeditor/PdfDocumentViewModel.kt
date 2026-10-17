@@ -59,6 +59,10 @@ class PdfDocumentViewModel : ViewModel() {
     private var geometry: List<PageGeometry> = emptyList()
     private val renderMutex = Mutex()
 
+    /** Every EditSession call runs here, one at a time: the session isn't thread-safe. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val sessionDispatcher = Dispatchers.IO.limitedParallelism(1)
+
     private val busy get() = state.busy != null
 
     fun open(context: Context, uri: Uri) {
@@ -99,7 +103,7 @@ class PdfDocumentViewModel : ViewModel() {
             fail(OPEN_FAILED)
             return
         }
-        runCatching { session?.close() }
+        session?.let { old -> withContext(sessionDispatcher) { runCatching { old.close() } } }
         session = next
         pendingEdit = null
         state = state.copy(
@@ -135,14 +139,19 @@ class PdfDocumentViewModel : ViewModel() {
         if (busy || state.editing != null) return
         val page = state.pageIndex
         viewModelScope.launch {
-            val hit = try {
-                withContext(Dispatchers.IO) { s.paragraphAt(page, pageX, pageY) }
+            val (hit, fixedText) = try {
+                withContext(sessionDispatcher) {
+                    // No paragraph there: say so only if there is (fixed) text under the finger.
+                    val h = s.paragraphAt(page, pageX, pageY)
+                    h to (h == null && s.uneditableTextAt(page, pageX, pageY))
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "hit test failed", t)
-                null
+                null to false
             }
-            if (hit == null || session !== s || state.pageIndex != page || busy) {
-                state = state.copy(outline = null)
+            if (session !== s || state.pageIndex != page || busy) { state = state.copy(outline = null); return@launch }
+            if (hit == null) {
+                state = state.copy(outline = null, message = if (fixedText) NOT_EDITABLE else state.message)
                 return@launch
             }
             state = state.copy(outline = geometry.getOrNull(page)?.transform?.toRect(hit.bounds))
@@ -196,7 +205,7 @@ class PdfDocumentViewModel : ViewModel() {
         state = state.copy(busy = BUSY_UPDATING)
         viewModelScope.launch {
             val outcome = try {
-                withContext(Dispatchers.IO) { s.apply(op, accept) }
+                withContext(sessionDispatcher) { s.apply(op, accept) }
             } catch (t: Throwable) {
                 Log.e(TAG, "apply failed", t)
                 fail(SOMETHING_WRONG)
@@ -228,7 +237,7 @@ class PdfDocumentViewModel : ViewModel() {
         state = state.copy(busy = BUSY_UPDATING, editing = null, draft = null, outline = null)
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { if (forward) s.redo() else s.undo() }
+                withContext(sessionDispatcher) { if (forward) s.redo() else s.undo() }
             } catch (t: Throwable) {
                 Log.e(TAG, "undo/redo failed", t)
                 fail(SOMETHING_WRONG)
@@ -253,7 +262,7 @@ class PdfDocumentViewModel : ViewModel() {
             false
         }
         if (!ok) {
-            runCatching { withContext(Dispatchers.IO) { revert() } }
+            runCatching { withContext(sessionDispatcher) { revert() } }
             runCatching { showSession(file, s, state.pageIndex) }
             syncHistory()
             fail(SOMETHING_WRONG)
@@ -262,13 +271,21 @@ class PdfDocumentViewModel : ViewModel() {
     }
 
     fun saveCopy(context: Context, uri: Uri) {
-        val s = session ?: return
-        if (busy) return
         val app = context.applicationContext
+        val s = session
+        if (s == null) {
+            // The app was closed while the save picker was open: drop the empty file the picker created.
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri) }
+            }
+            state = state.copy(message = SAVE_NO_SESSION)
+            return
+        }
+        if (busy) return
         state = state.copy(busy = BUSY_SAVING)
         viewModelScope.launch {
             val ok = try {
-                withContext(Dispatchers.IO) {
+                withContext(sessionDispatcher) {
                     app.contentResolver.openOutputStream(uri, "wt")?.use { s.save(it); true } ?: false
                 }
             } catch (t: Throwable) {
@@ -318,7 +335,7 @@ class PdfDocumentViewModel : ViewModel() {
      */
     private suspend fun showSession(file: File, s: EditSession, page: Int): Boolean {
         renderMutex.withLock {
-            withContext(Dispatchers.IO) {
+            withContext(sessionDispatcher) {
                 val bytes = s.renderedBytes()
                 val boxes = s.pageGeometry()
                 closeDisplay()
@@ -474,6 +491,8 @@ class PdfDocumentViewModel : ViewModel() {
         const val SOMETHING_WRONG = "Something went wrong. Your document wasn't changed."
         private const val OPEN_FAILED = "This file couldn't be opened as a PDF."
         private const val PASSWORD = "This PDF is password-protected."
+        private const val NOT_EDITABLE = "This text can't be edited in this version."
+        private const val SAVE_NO_SESSION = "Couldn't save — please open the document again."
     }
 }
 

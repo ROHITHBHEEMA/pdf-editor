@@ -13,6 +13,19 @@ What it does:
 
 Version 1 edits English (Latin-script) text only. Text in other languages is left untouched.
 
+## What it can't do yet
+
+- **Other languages.** Text in other scripts (for example Hindi, Russian or Chinese) can't be edited. It stays
+  exactly as it is and still moves with the page.
+- **Scanned PDFs.** A scanned page is a picture of text, so there is nothing to edit.
+- **Text in tables and columns can't grow.** You can fix words there, but if the new text needs more room than
+  the old text had, the app asks you to shorten it.
+- **Underlines don't move.** If you rewrite underlined or highlighted text, the underline or highlight stays where
+  it was (the app asks you first).
+- **Clickable links don't move.** If text moves to a new position, a link that was on it stays at the old spot.
+- **The font may change to a similar one.** If the document's font doesn't include a letter you type, the
+  paragraph switches to a similar-looking font. You'll be asked first.
+
 ## What you need on your computer
 
 Everything below is for building the app yourself. Commands are typed in the Terminal app.
