@@ -1,64 +1,65 @@
 package app.pdfeditor.flow
 
 import com.tom_roush.pdfbox.contentstream.operator.Operator
+import com.tom_roush.pdfbox.cos.COSName
 
 /** Reconstructs the graphics-state-setting operators in effect at a token index, so moved content keeps its look. */
 object GraphicsStatePrefix {
 
     private val SIMPLE = setOf("w", "J", "j", "M", "d", "ri", "i")
+    private const val FILL_CS = "fillCs"
+    private const val FILL = "fill"
+    private const val STROKE_CS = "strokeCs"
+    private const val STROKE = "stroke"
 
-    private class State(
-        val simple: LinkedHashMap<String, List<Any>> = LinkedHashMap(),
-        val gs: MutableList<List<Any>> = ArrayList(),
-        var fillCs: List<Any> = emptyList(),
-        var fill: List<Any> = emptyList(),
-        var strokeCs: List<Any> = emptyList(),
-        var stroke: List<Any> = emptyList(),
-    ) {
-        fun copy() = State(LinkedHashMap(simple), ArrayList(gs), fillCs, fill, strokeCs, stroke)
-    }
+    /** One tracked operator group (operands + operator) and the kind it replaces. */
+    private class Entry(val kind: String, val group: List<Any>)
 
     /**
-     * Operator groups (operands + operator) for w J j M d ri i gs and fill/stroke colour in effect at [index]:
-     * groups inside closed q…Q pairs and inside other text objects are dropped; a later op of a kind replaces an
-     * earlier one (each distinct `gs` is kept, in order, since each may set different parameters).
+     * Operator groups (operands + operator) for w J j M d ri i gs and fill/stroke colour in effect at [index], in
+     * source order. Groups inside closed q…Q pairs are dropped (ET does not reset graphics state); a later op of a
+     * kind removes the earlier entry and is appended; each `gs` resource is kept individually.
      */
-    fun at(tokens: List<Any>, index: Int): List<Any> {
-        var st = State()
-        val stack = ArrayDeque<State>()
+    fun at(tokens: List<Any>, index: Int): List<Any> = atAll(tokens, listOf(index)).getValue(index)
+
+    /** [at] for every index in [indices], computed in one forward pass over [tokens]. */
+    fun atAll(tokens: List<Any>, indices: Collection<Int>): Map<Int, List<Any>> {
+        val wanted = indices.toSortedSet().toIntArray()
+        val result = HashMap<Int, List<Any>>(wanted.size * 2)
+        var state = ArrayList<Entry>()
+        val stack = ArrayDeque<ArrayList<Entry>>()
+        var next = 0
         var operandStart = 0
-        var i = 0
-        val end = minOf(index, tokens.size)
-        while (i < end) {
+
+        fun snapshot(): List<Any> = ArrayList<Any>().also { out -> state.forEach { out.addAll(it.group) } }
+        fun replace(vararg kinds: String) { state.removeAll { it.kind in kinds } }
+
+        for (i in tokens.indices) {
+            while (next < wanted.size && wanted[next] <= i) { result[wanted[next]] = snapshot(); next++ }
+            if (next >= wanted.size) break
             val t = tokens[i]
-            if (t !is Operator) { i++; continue }
-            val group = tokens.subList(operandStart, i + 1).toList()
-            when (val name = t.name) {
-                "q" -> stack.addLast(st.copy())
-                "Q" -> if (stack.isNotEmpty()) st = stack.removeLast()
-                "BT" -> {
-                    // Skip a text object that doesn't contain index; inside the containing one, keep going.
-                    var e = i + 1
-                    while (e < tokens.size && !(tokens[e] is Operator && (tokens[e] as Operator).name == "ET")) e++
-                    if (index > e) { i = e + 1; operandStart = i; continue }
+            if (t !is Operator) continue
+            val name = t.name
+            fun group() = tokens.subList(operandStart, i + 1).toList() // allocated only for tracked ops
+            when (name) {
+                "q" -> stack.addLast(ArrayList(state))
+                "Q" -> if (stack.isNotEmpty()) state = stack.removeLast()
+                in SIMPLE -> { replace(name); state += Entry(name, group()) }
+                "gs" -> {
+                    val kind = "gs:" + ((tokens.getOrNull(i - 1) as? COSName)?.name ?: "")
+                    replace(kind); state += Entry(kind, group())
                 }
-                in SIMPLE -> { st.simple.remove(name); st.simple[name] = group }
-                "gs" -> { st.gs.removeAll { it.toString() == group.toString() }; st.gs += group }
-                "cs" -> { st.fillCs = group; st.fill = emptyList() }
-                "CS" -> { st.strokeCs = group; st.stroke = emptyList() }
-                "sc", "scn" -> st.fill = group
-                "SC", "SCN" -> st.stroke = group
-                "g", "rg", "k" -> { st.fillCs = emptyList(); st.fill = group }
-                "G", "RG", "K" -> { st.strokeCs = emptyList(); st.stroke = group }
+                "cs" -> { replace(FILL_CS, FILL); state += Entry(FILL_CS, group()) }
+                "CS" -> { replace(STROKE_CS, STROKE); state += Entry(STROKE_CS, group()) }
+                "sc", "scn" -> { replace(FILL); state += Entry(FILL, group()) }
+                "SC", "SCN" -> { replace(STROKE); state += Entry(STROKE, group()) }
+                "g", "rg", "k" -> { replace(FILL_CS, FILL); state += Entry(FILL, group()) }
+                "G", "RG", "K" -> { replace(STROKE_CS, STROKE); state += Entry(STROKE, group()) }
             }
-            i++
-            operandStart = i
+            operandStart = i + 1
         }
-        val out = ArrayList<Any>()
-        st.simple.values.forEach { out.addAll(it) }
-        st.gs.forEach { out.addAll(it) }
-        out.addAll(st.strokeCs); out.addAll(st.stroke)
-        out.addAll(st.fillCs); out.addAll(st.fill)
-        return out
+        // Indices at or past the end see the final state.
+        while (next < wanted.size) { result[wanted[next]] = snapshot(); next++ }
+        return result
     }
 }

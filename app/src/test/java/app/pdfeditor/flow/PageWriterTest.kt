@@ -287,6 +287,87 @@ class PageWriterTest {
         }
     }
 
+    @Test fun movedRunKeepsColourSetInEarlierTextObject() {
+        val bytes = miniPdf("BT 1 0 0 rg /F1 12 Tf 72 700 Td (red) Tj ET BT /F1 12 Tf 72 680 Td (still red) Tj ET\n")
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val parsed = ContentStreamEngine.parse(page)
+            val node = runNodes(page).single { it.run!!.text == "still red" }
+            PageWriter.write(doc, page, parsed.tokens, listOf(node), listOf(Draw.MoveBlock(lineBlock(listOf(node)), page, -30f)))
+            save(doc)
+        }
+        PDDocument.load(saved).use { d ->
+            val parsed = ContentStreamEngine.parse(d.getPage(0))
+            val group = parsed.root.children.last()
+            val moved = parsed.tokens.subList(group.startIndex, group.endIndex + 1).joinToString(" ", transform = ::tokStr)
+            assertTrue(moved, moved.contains("1.0 0.0 0.0 rg"))
+            val r = runs(d.getPage(0)).single { it.text == "still red" }
+            assertEquals(listOf("1.0", "0.0", "0.0", "rg"), r.fillColorTokens.map(::tokStr))
+            assertEquals(650f, r.originY, 0.01f)
+        }
+    }
+
+    @Test fun removedRunKeepsFollowingRunOnSameLineInPlace() {
+        val bytes = miniPdf("BT /F1 10 Tf 72 700 Td (Edited) Tj (Other) Tj ET\n")
+        val oldOther = runsOf(bytes).single { it.text == "Other" }
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val parsed = ContentStreamEngine.parse(page)
+            PageWriter.write(doc, page, parsed.tokens, listOf(runNodes(page).single { it.run!!.text == "Edited" }), emptyList())
+            save(doc)
+        }
+        assertEquals(oldOther.originX, runsOf(saved).single { it.text == "Other" }.originX, 0.05f)
+        assertFalse(extractText(saved).contains("Edited"))
+    }
+
+    @Test fun removedTjArrayWithSpacingKeepsFollowingRunInPlace() {
+        val bytes = miniPdf("BT /F1 10 Tf 2 Tw 1 Tc 80 Tz 72 700 Td [(Ed) -120 (ited text)] TJ (Other) Tj ET\n")
+        val oldOther = runsOf(bytes).single { it.text == "Other" }
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val parsed = ContentStreamEngine.parse(page)
+            PageWriter.write(doc, page, parsed.tokens, listOf(runNodes(page).first { it.run!!.text.startsWith("Ed") }), emptyList())
+            save(doc)
+        }
+        assertEquals(oldOther.originX, runsOf(saved).single { it.text == "Other" }.originX, 0.05f)
+        assertFalse(extractText(saved).contains("Ed"))
+    }
+
+    @Test fun unbalancedOriginalDoesNotLeakIntoDraws() {
+        val bytes = miniPdf("q 2 0 0 2 0 0 cm BT /F1 10 Tf 10 300 Td (x) Tj ET\n")
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val font = page.resources.getFont(COSName.getPDFName("F1"))!!
+            val style = SpanStyle("F1", 10f, 1f, emptyList(), 0f, 0f)
+            val line = LaidLine(listOf(PlacedFragment("Hi", style, 72f, 10f, 0f)), 650f)
+            PageWriter.write(doc, page, ContentStreamEngine.parse(page).tokens, emptyList(),
+                listOf(Draw.NewLine(line, FontPlan(mapOf(style to font), null), page)))
+            save(doc)
+        }
+        val rs = runsOf(saved)
+        val hi = rs.single { it.text == "Hi" }
+        assertEquals(10f, hi.effectiveFontSize, 0.01f)
+        assertEquals(650f, hi.originY, 0.01f)
+        assertEquals(20f, rs.single { it.text == "x" }.effectiveFontSize, 0.01f)
+    }
+
+    @Test fun surplusQInOriginalDoesNotLeakIntoDraws() {
+        val bytes = miniPdf("q Q Q 3 0 0 3 0 0 cm BT /F1 10 Tf 10 100 Td (x) Tj ET\n")
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val font = page.resources.getFont(COSName.getPDFName("F1"))!!
+            val style = SpanStyle("F1", 10f, 1f, emptyList(), 0f, 0f)
+            val line = LaidLine(listOf(PlacedFragment("Hi", style, 72f, 10f, 0f)), 650f)
+            PageWriter.write(doc, page, ContentStreamEngine.parse(page).tokens, emptyList(),
+                listOf(Draw.NewLine(line, FontPlan(mapOf(style to font), null), page)))
+            save(doc)
+        }
+        val rs = runsOf(saved)
+        assertEquals(10f, rs.single { it.text == "Hi" }.effectiveFontSize, 0.01f)
+        assertEquals(650f, rs.single { it.text == "Hi" }.originY, 0.01f)
+        assertEquals(30f, rs.single { it.text == "x" }.effectiveFontSize, 0.01f)
+    }
+
     @Test fun newLineJustifiedTjArray() {
         val saved = PDDocument().use { doc ->
             val page = PDPage(PDRectangle.A4)

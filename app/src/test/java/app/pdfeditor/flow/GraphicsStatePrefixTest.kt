@@ -39,11 +39,25 @@ class GraphicsStatePrefixTest {
         assertFalse(p, p.contains("5 w"))
     }
 
-    @Test fun laterOpsReplaceEarlierAndOtherTextObjectsAreSkipped() {
-        val p = prefixAt("1 w 3 w 1 g BT 0.5 g ET /DeviceRGB cs 0 1 0 scn 10 10 m 100 10 l S\n") {
-            it.single { n -> n.kind == NodeKind.PATH }
+    @Test fun laterOpsReplaceEarlierAndTextObjectsDoNotReset() {
+        val p = prefixAt("1 w 3 w 1 g BT 0.5 g ET 10 10 m 100 10 l S\n") { it.single { n -> n.kind == NodeKind.PATH } }
+        assertEquals("3 w 0.5 g", p)
+    }
+
+    @Test fun colourSpaceResetsColourAndSourceOrderIsKept() {
+        val p = prefixAt("1 0 0 RG 2 w 0 g 3 w /DeviceRGB cs 0 1 0 scn 10 10 m 100 10 l S\n") { it.single { n -> n.kind == NodeKind.PATH } }
+        assertEquals("1 0 0 RG 3 w /DeviceRGB cs 0 1 0 scn", p)
+    }
+
+    @Test fun atAllMatchesAtInOnePass() {
+        val content = "2 w BT /F1 10 Tf 1 0 0 rg 72 700 Td (a) Tj ET q 5 w 72 600 m 90 600 l S Q 0 0 1 RG 72 500 m 90 500 l S\n"
+        PDDocument.load(miniPdf(content)).use { doc ->
+            val parsed = ContentStreamEngine.parse(doc.getPage(0))
+            val idx = parsed.leaves.flatMap { listOf(it) + it.children }.map { it.startIndex } + parsed.tokens.size
+            val all = GraphicsStatePrefix.atAll(parsed.tokens, idx)
+            idx.forEach { assertEquals(str(GraphicsStatePrefix.at(parsed.tokens, it)), str(all.getValue(it))) }
+            assertEquals("2 w 1 0 0 rg 0 0 1 RG", str(all.getValue(parsed.tokens.size)))
         }
-        assertEquals("3 w /DeviceRGB cs 0 1 0 scn", p)
     }
 
     @Test fun runSeesColourSetInsideItsOwnTextObject() {
