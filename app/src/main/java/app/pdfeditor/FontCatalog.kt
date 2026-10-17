@@ -3,6 +3,7 @@ package app.pdfeditor
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.pdfeditor.flow.FontProvider
 import com.tom_roush.fontbox.ttf.TrueTypeCollection
 import com.tom_roush.fontbox.ttf.TrueTypeFont
 import com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -29,7 +30,7 @@ class FontOption(
 // in filesDir. resolve embeds a chosen font into the open document; small
 // fonts are embedded whole and cached so reuse dedups, large ones (CJK) are
 // subset fresh per edit so pdfbox can finalize each subset on the next save.
-class FontCatalog(private val appContext: Context) {
+class FontCatalog(private val appContext: Context) : FontProvider {
 
     private val customDir: File = File(appContext.filesDir, "fonts").apply { mkdirs() }
 
@@ -54,6 +55,12 @@ class FontCatalog(private val appContext: Context) {
         all.addAll(scanCustom())
         return all.map { FontOption(it.id, it.displayName, it.source) }
     }
+
+    override fun load(doc: PDDocument, id: String): PDFont? = resolve(doc, id)
+
+    override fun matchId(original: PDFont?): String? = autoMatchId(original)
+
+    override fun displayName(id: String): String = findEntry(id)?.displayName ?: id
 
     fun resolve(doc: PDDocument, id: String): PDFont? {
         if (doc !== cacheDoc) {
