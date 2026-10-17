@@ -302,6 +302,7 @@ class PdfDocumentViewModel : ViewModel() {
 
     private fun rejectMessage(reason: RejectReason, detail: String): String = when (reason) {
         RejectReason.NON_LATIN -> "Editing this language isn't supported yet."
+        RejectReason.UNREADABLE -> "This text can't be read from the file, so it can't be edited."
         RejectReason.UNSUPPORTED_CHARS -> "These characters can't be added: ${spacedChars(detail)}"
         RejectReason.NO_ROOM -> "There's no room to make this text longer here. Please shorten it."
         RejectReason.LAST_PAGE -> "A document needs at least one page."

@@ -14,7 +14,7 @@ sealed class EditOp {
     class DeletePage(val page: Int) : EditOp()
 }
 
-enum class RejectReason { NON_LATIN, UNSUPPORTED_CHARS, NO_ROOM, NOT_FOUND, LAST_PAGE }
+enum class RejectReason { NON_LATIN, UNREADABLE, UNSUPPORTED_CHARS, NO_ROOM, NOT_FOUND, LAST_PAGE }
 
 sealed class EditOutcome {
     object Applied : EditOutcome()
@@ -109,11 +109,18 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         is EditOp.DeletePage -> deletePage(op.page)
     }
 
+    /** Why [p] can't be edited at all, or null. */
+    private fun notEditable(p: Paragraph): RejectReason? = when {
+        p.unreadable -> RejectReason.UNREADABLE
+        p.nonLatin -> RejectReason.NON_LATIN
+        else -> null
+    }
+
     private fun currentSpans(p: Paragraph): List<Span> = state.edits[p.id] ?: p.spans
 
     private fun editParagraph(op: EditOp.EditParagraph, accept: Boolean): EditOutcome {
         val p = m.byId[op.id] ?: return EditOutcome.Rejected(RejectReason.NOT_FOUND)
-        if (p.nonLatin) return EditOutcome.Rejected(RejectReason.NON_LATIN)
+        notEditable(p)?.let { return EditOutcome.Rejected(it) }
         val current = currentSpans(p)
         if (current.joinToString("") { it.text } == op.newText) return EditOutcome.Applied
         // StyleMapper needs styled characters: map from the original spans when the paragraph was emptied.
@@ -253,7 +260,7 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         val bounds = Bounds.empty().apply { hit.value.forEach(::includeBounds) }
         return ParagraphHit(
             par.id, currentSpans(par).joinToString("") { it.text }, page, bounds,
-            editable = !par.nonLatin, reason = if (par.nonLatin) RejectReason.NON_LATIN else null,
+            editable = notEditable(par) == null, reason = notEditable(par),
         )
     }
 

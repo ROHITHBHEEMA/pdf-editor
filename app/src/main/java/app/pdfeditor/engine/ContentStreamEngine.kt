@@ -405,6 +405,7 @@ object ContentStreamEngine {
                     }
                     if (u != null) sb.append(u)
                     else if (code in 32..126) sb.append(code.toChar())
+                    else sb.append('\uFFFD') // undecodable glyph: keep a marker so the text isn't edited blind
                     val glyph = try {
                         font.getDisplacement(code).x * fontSize
                     } catch (_: Exception) {

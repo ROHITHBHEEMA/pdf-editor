@@ -395,4 +395,14 @@ class EditSessionTest {
             assertTrue(extractText(out).contains("Front page text"))
         }
     }
+
+    // ---- final fix 3: undecodable text is reported as unreadable ----
+
+    @Test fun unreadableParagraphRejected() {
+        bytes = app.pdfeditor.testing.miniPdf("BT /F1 12 Tf 72 700 Td (Menu \u0080 item) Tj ET\n")
+        val id = paragraphs().single().id
+        assertEquals(RejectReason.UNREADABLE, (s.apply(EditParagraph(id, "Menu item")) as EditOutcome.Rejected).reason)
+        val hit = s.paragraphAt(0, 80f, 703f)!!
+        assertFalse(hit.editable); assertEquals(RejectReason.UNREADABLE, hit.reason)
+    }
 }

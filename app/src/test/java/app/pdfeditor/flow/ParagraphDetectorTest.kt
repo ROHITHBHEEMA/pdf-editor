@@ -104,4 +104,19 @@ class ParagraphDetectorTest {
         assertFalse(p.text().contains('\n'))
         assertTrue(detect(PdfFixtures.letter(listOf("word ".repeat(80)))).none { it.text().contains('\n') })
     }
+
+    // ---- final fix 3: Latin check by Unicode script ----
+
+    @Test fun latinCheckByScript() {
+        assertTrue(isLatinText("€ 5 ™ → ✓ ﬁle"))
+        assertTrue(isLatinText("Café – “ok” naïve Ångström"))
+        assertFalse(isLatinText("नमस्ते")); assertFalse(isLatinText("Привет")); assertFalse(isLatinText("你好"))
+    }
+
+    @Test fun undecodableGlyphMakesParagraphUnreadable() {
+        // Code 0x80 has no character in Helvetica's standard encoding.
+        val p = detect(app.pdfeditor.testing.miniPdf("BT /F1 12 Tf 72 700 Td (Menu \u0080 item) Tj ET\n")).single()
+        assertTrue(p.unreadable); assertTrue(p.text().contains('\uFFFD'))
+        assertFalse(detect(PdfFixtures.sampleLetter()).any { it.unreadable })
+    }
 }

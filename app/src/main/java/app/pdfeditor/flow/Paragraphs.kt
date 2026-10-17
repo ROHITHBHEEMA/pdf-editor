@@ -38,12 +38,23 @@ class Paragraph(
     val canGrow: Boolean, // false inside a UNIT or on a pinned page
     val nonLatin: Boolean,
     val runNodes: List<DrawNode>, // exact run nodes composing the paragraph, in reading order
-)
+) {
+    /** Some glyph couldn't be turned back into a character (shown as U+FFFD), so the text can't be edited safely. */
+    val unreadable: Boolean get() = spans.any { it.text.contains(UNREADABLE_CHAR) }
+}
+
+const val UNREADABLE_CHAR = '\uFFFD'
 
 fun Paragraph.text(): String = spans.joinToString("") { it.text }
 
-/** True when every char is Basic Latin, Latin-1 Supplement, Latin Extended-A/B or General Punctuation. */
-fun isLatinText(s: String): Boolean = s.all { it.code <= 0x024F || it.code in 0x2000..0x206F }
+/** True when, after NFKC normalisation, every code point is in the Latin, Common or Inherited script. */
+fun isLatinText(s: String): Boolean =
+    java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC).codePoints().allMatch { cp ->
+        when (Character.UnicodeScript.of(cp)) {
+            Character.UnicodeScript.LATIN, Character.UnicodeScript.COMMON, Character.UnicodeScript.INHERITED -> true
+            else -> false
+        }
+    }
 
 object ParagraphDetector {
     private const val SIZE_TOL = 0.5f
