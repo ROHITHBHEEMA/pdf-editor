@@ -51,12 +51,12 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
                 PDDocument.load(copy)
             } catch (_: InvalidPasswordException) {
                 return OpenResult.PasswordProtected
-            } catch (_: Exception) {
+            } catch (_: Throwable) { // malformed files can raise errors, not just exceptions
                 return OpenResult.Failed(OPEN_FAILED)
             }
             return try {
                 OpenResult.Opened(EditSession(SessionModel(copy, doc, DocumentAnalyzer.analyze(doc), fonts)))
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 doc.close()
                 OpenResult.Failed(OPEN_FAILED)
             }
@@ -118,10 +118,8 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         if (current.joinToString("") { it.text } == op.newText) return EditOutcome.Applied
         // StyleMapper needs styled characters: map from the original spans when the paragraph was emptied.
         val spans = StyleMapper.apply(current.ifEmpty { p.spans }, op.newText)
-        // An edited paragraph's lines are new; drop deletions recorded against its previous lines.
-        val deleted = state.deletedBlocks.filterNot { it is BlockId.Edited && it.paragraph == p.id }.toSet()
         val edits = if (spans == p.spans) state.edits - p.id else state.edits + (p.id to spans)
-        if (spans.isEmpty()) return push(state.copy(edits = edits, deletedBlocks = deleted))
+        if (spans.isEmpty()) return push(state.copy(edits = edits))
 
         val plan = when (val r = m.plan(spans)) {
             is FontPlanResult.Unsupported -> return EditOutcome.Rejected(RejectReason.UNSUPPORTED_CHARS, r.chars)
@@ -133,7 +131,7 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         }
         val warning = plan.warning
         if (warning != null && !accept) return EditOutcome.NeedsFontConfirmation(warning)
-        return push(state.copy(edits = edits, deletedBlocks = deleted))
+        return push(state.copy(edits = edits))
     }
 
     private fun addBlankPage(before: Int): EditOutcome {
@@ -147,14 +145,68 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         return push(state.copy(slots = newSlots))
     }
 
+    /**
+     * Deletes output page [page]. Paragraph lines on it become a text edit: a paragraph wholly on the page is
+     * emptied, one partly on it keeps the text of its lines elsewhere (so deleted words can't come back on a later
+     * edit). Other placed blocks (graphics, units) go to `deletedBlocks`; an Original or UserBlank slot is removed.
+     */
     private fun deletePage(page: Int): EditOutcome {
         val fl = flow()
         val slots = fl.result.slots
         if (page !in slots.indices) return EditOutcome.Rejected(RejectReason.NOT_FOUND, "page $page")
         if (slots.size == 1) return EditOutcome.Rejected(RejectReason.LAST_PAGE)
-        val slot = slots[page].slot
-        val placed = fl.result.placements.filter { it.slotIndex == page }.map { it.id }
-        return push(state.copy(slots = state.slots - slot, deletedBlocks = state.deletedBlocks + placed))
+
+        // Every placed paragraph line, keyed by paragraph, with its output page.
+        val lines = LinkedHashMap<ParagraphId, MutableList<Pair<BlockId, Int>>>()
+        val deleted = state.deletedBlocks.toMutableSet()
+        for (pl in fl.result.placements) {
+            val owner = when (val id = pl.id) {
+                is BlockId.Edited -> id.paragraph
+                is BlockId.Orig -> m.paragraphOfLine[id]?.id
+            }
+            if (owner != null) lines.getOrPut(owner) { mutableListOf() } += pl.id to pl.slotIndex
+            else if (pl.slotIndex == page) deleted += pl.id
+        }
+        val edits = state.edits.toMutableMap()
+        for ((pid, placed) in lines) {
+            val (gone, kept) = placed.partition { it.second == page }
+            if (gone.isEmpty()) continue
+            val keep = remainingSpans(m.byId.getValue(pid), kept.map { it.first })
+            if (keep == null) deleted += gone.map { it.first } // remaining text has no drawable plan: hide the lines
+            else edits[pid] = keep
+        }
+        val newSlots = state.slots - slots[page].slot
+        return push(EditState(newSlots, edits, deleted))
+    }
+
+    /** Spans of the paragraph's [kept] lines, joined with a space; null when they can't be laid out. */
+    private fun remainingSpans(p: Paragraph, kept: List<BlockId>): List<Span>? {
+        if (kept.isEmpty()) return emptyList()
+        val edited = state.edits[p.id]
+        val spans = if (edited == null) {
+            val order = p.lineBlocks.withIndex().associate { (i, b) -> b to i }
+            ParagraphDetector.spansOf(kept.sortedBy { order[it] }.map { m.block(it as BlockId.Orig).runNodes })
+        } else {
+            val laid = m.lines(p, edited)
+            joinLines(kept.map { (it as BlockId.Edited).line }.sorted().map { laid[it] })
+        }
+        return spans.takeIf { it.isEmpty() || m.plan(it) is FontPlanResult.Ok }
+    }
+
+    /** Laid lines back to spans: fragments in order, a space between lines, same-style neighbours merged. */
+    private fun joinLines(lines: List<LaidLine>): List<Span> {
+        val out = ArrayList<Span>()
+        fun append(text: String, style: SpanStyle) {
+            val last = out.lastOrNull()
+            if (last != null && last.style == style) out[out.lastIndex] = Span(last.text + text, style) else out += Span(text, style)
+        }
+        for ((i, line) in lines.withIndex()) {
+            val frags = line.fragments.filter { it.text.isNotEmpty() }
+            if (frags.isEmpty()) continue
+            if (i > 0 && out.isNotEmpty() && !out.last().text.endsWith(" ")) append(" ", out.last().style)
+            frags.forEach { append(it.text, it.style) }
+        }
+        return out
     }
 
     /** The paragraph whose placed lines on output page [page] contain (x, y), with 2pt slack. */

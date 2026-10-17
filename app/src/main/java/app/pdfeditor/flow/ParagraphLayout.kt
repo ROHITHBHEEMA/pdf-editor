@@ -50,7 +50,10 @@ object ParagraphLayout {
     fun textWidth(text: String, style: SpanStyle, font: PDFont, plan: FontPlan? = null): Float {
         val glyphs = try {
             font.getStringWidth(text)
-        } catch (e: Exception) {
+        } catch (e: IllegalArgumentException) {
+            if (plan == null) throw e
+            encodedWidth(plan.encode(style, text), font)
+        } catch (e: java.io.IOException) {
             if (plan == null) throw e
             encodedWidth(plan.encode(style, text), font)
         }

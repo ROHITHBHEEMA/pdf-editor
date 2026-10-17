@@ -15,6 +15,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 
@@ -25,7 +26,10 @@ class EditSessionTest {
     private fun open(bytes: ByteArray): EditSession = (EditSession.open(bytes, fonts) as OpenResult.Opened).session
 
     private var bytes: ByteArray = PdfFixtures.sampleLetter()
-    private val s: EditSession by lazy { open(bytes) }
+    private val session = lazy { open(bytes) }
+    private val s: EditSession by session
+
+    @After fun closeSession() { if (session.isInitialized()) s.close() }
 
     private fun saved(session: EditSession = s): ByteArray = ByteArrayOutputStream().also { session.save(it) }.toByteArray()
 
@@ -131,6 +135,11 @@ class EditSessionTest {
 
     @Test fun passwordPdfReported() { assertTrue(EditSession.open(PdfFixtures.encrypted("pw"), fonts) is OpenResult.PasswordProtected) }
 
+    @Test fun truncatedPdfReported() {
+        val r = EditSession.open(bytes.copyOf(bytes.size / 3), fonts)
+        if (r is OpenResult.Opened) r.session.close() else assertTrue(r is OpenResult.Failed)
+    }
+
     @Test fun garbageReported() {
         val r = EditSession.open("hello".toByteArray(), fonts)
         assertTrue(r is OpenResult.Failed); assertEquals("This file couldn't be opened as a PDF", (r as OpenResult.Failed).message)
@@ -138,7 +147,7 @@ class EditSessionTest {
 
     @Test fun saveIsFullRewrite() { assertEquals(1, String(saved(), Charsets.ISO_8859_1).split("%%EOF").size - 1) }
 
-    @Test fun metadataPreserved() { assertEquals("Sample Letter", PDDocument.load(saved()).documentInformation.title) }
+    @Test fun metadataPreserved() { assertEquals("Sample Letter", PDDocument.load(saved()).use { it.documentInformation.title }) }
 
     // ---- extra coverage ----
 
@@ -236,5 +245,58 @@ class EditSessionTest {
         assertEquals(1, s.pageCount)
         val t = extractText(saved())
         assertTrue(t.contains("Coordinater")); assertFalse(t.contains("Project Update Letter"))
+    }
+
+    // ---- fix round 1: page deletion turns partial paragraphs into text edits ----
+
+    private fun onPage(id: ParagraphId, page: Int): ParagraphHit? =
+        (0..850 step 2).firstNotNullOfOrNull { y -> s.paragraphAt(page, 100f, y.toFloat())?.takeIf { it.id == id } }
+
+    @Test fun deletingPageWithPartOfEditedParagraphKeepsOnlyTheRest() {
+        val marker = "flibbertigibbet"
+        s.apply(EditParagraph(longId, longText.repeat(7) + " $marker"), true)
+        assertEquals(2, s.pageCount); assertTrue(extractText(saved(), page = 2).contains(marker))
+        assertEquals(EditOutcome.Applied, s.apply(DeletePage(1)))
+        assertEquals(1, s.pageCount)
+        val hit = onPage(longId, 0)!!
+        assertTrue(hit.text.startsWith("The construction team")); assertFalse(hit.text.contains(marker))
+        assertTrue(hit.text.length < longText.length * 7)
+        assertFalse(extractText(saved()).contains(marker)); assertFalse(extractText(saved()).contains("Coordinater"))
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(longId, hit.text.replaceFirst("The construction team", "The building team")), true))
+        val t = extractText(saved()); assertFalse(t.contains(marker)); assertTrue(t.contains("The building team"))
+        assertEquals(1, s.pageCount)
+        s.undo(); s.undo()
+        assertEquals(2, s.pageCount); assertTrue(extractText(saved()).contains(marker))
+        assertTrue(onPage(longId, 0)!!.text.endsWith(marker))
+    }
+
+    @Test fun deletingSecondPageOfCrossPageParagraph() {
+        val long = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega. "
+            .repeat(4).trim() + " Finalword"
+        bytes = PdfFixtures.letter(List(27) { "Filler line $it." } + long)
+        assertEquals(2, s.pageCount)
+        val first = paragraphs().single { it.id.page == 0 && it.text().startsWith("Alpha") }
+        assertTrue(paragraphs().filter { it.id.page == 1 }.joinToString(" ") { it.text() }.contains("Finalword"))
+        assertEquals(EditOutcome.Applied, s.apply(DeletePage(1)))
+        val hit = s.paragraphAt(0, 80f, first.firstBaseline + 2f)!!
+        assertEquals(first.id, hit.id); assertEquals(first.text(), hit.text)
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(hit.id, hit.text + " added"), true))
+        val t = extractText(saved()); assertFalse(t.contains("Finalword")); assertTrue(t.contains("added"))
+    }
+
+    @Test fun deletingPageWithMovedPartOfUneditedParagraph() {
+        val thank = paragraphs().single { it.text().startsWith("Thank you") }
+        // Grow the paragraph above until the (unedited) long paragraph straddles pages 1 and 2.
+        val split = (6..24).any { k ->
+            s.apply(EditParagraph(thank.id, thank.text().repeat(k)), true)
+            (onPage(longId, 0) != null && onPage(longId, 1) != null).also { if (!it) s.undo() }
+        }
+        assertTrue(split)
+        assertEquals(EditOutcome.Applied, s.apply(DeletePage(1)))
+        val hit = onPage(longId, 0)!!
+        assertTrue(longText.startsWith(hit.text)); assertTrue(hit.text.length < longText.length)
+        assertFalse(extractText(saved()).contains("official opening"))
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(longId, hit.text + " more"), true))
+        assertFalse(extractText(saved()).contains("official opening"))
     }
 }

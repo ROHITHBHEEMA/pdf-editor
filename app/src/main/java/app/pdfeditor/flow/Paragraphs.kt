@@ -205,6 +205,20 @@ object ParagraphDetector {
         val firstLineIndent =
             if (n >= 2 && (alignment == Alignment.LEFT || alignment == Alignment.JUSTIFIED)) max(0f, first.left - lines[1].left) else 0f
 
+        val spans = buildSpans(lines)
+        val id = ParagraphId(page.pageIndex, lines[0].blockIndex, sub)
+        val text = spans.joinToString("") { it.text }
+        return Paragraph(
+            id, lines.map { it.blockId }, spans, left, right, firstLineIndent, lineAdvance,
+            first.baseline, alignment, canGrow = !unit && page.pinned == null, nonLatin = !isLatinText(text), runNodes = lines.flatMap { it.nodes },
+        )
+    }
+
+    /** Spans of whole visual lines (each a list of run nodes), built exactly as a detected paragraph's spans. */
+    internal fun spansOf(lines: List<List<DrawNode>>): List<Span> =
+        buildSpans(lines.filter { l -> l.any { it.run != null } }.map { l -> Line(l.filter { it.run != null }.sortedBy { it.run!!.originX }, BlockId.Orig(-1, -1), -1) })
+
+    private fun buildSpans(lines: List<Line>): List<Span> {
         val spans = ArrayList<Span>()
         fun append(text: String, style: SpanStyle) {
             if (text.isEmpty()) return
@@ -227,12 +241,7 @@ object ParagraphDetector {
                 append(r.text, styleOf(r))
             }
         }
-        val id = ParagraphId(page.pageIndex, lines[0].blockIndex, sub)
-        val text = spans.joinToString("") { it.text }
-        return Paragraph(
-            id, lines.map { it.blockId }, spans, left, right, firstLineIndent, lineAdvance,
-            first.baseline, alignment, canGrow = !unit && page.pinned == null, nonLatin = !isLatinText(text), runNodes = lines.flatMap { it.nodes },
-        )
+        return spans
     }
 
     private fun styleOf(r: TextRunInfo) = SpanStyle(
