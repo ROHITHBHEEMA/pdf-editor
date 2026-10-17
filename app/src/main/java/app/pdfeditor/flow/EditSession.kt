@@ -18,7 +18,11 @@ enum class RejectReason { NON_LATIN, UNREADABLE, UNSUPPORTED_CHARS, NO_ROOM, NOT
 
 sealed class EditOutcome {
     object Applied : EditOutcome()
-    class NeedsFontConfirmation(val warning: FontWarning) : EditOutcome()
+    /**
+     * The edit needs the user's OK: [fontWarning] when a similar font must stand in, [decorationsStay] when the
+     * paragraph has underlines/highlights that won't move with the rewritten text.
+     */
+    class NeedsConfirmation(val fontWarning: FontWarning?, val decorationsStay: Boolean) : EditOutcome()
     class Rejected(val reason: RejectReason, val detail: String = "") : EditOutcome()
 }
 
@@ -103,8 +107,9 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         return EditOutcome.Applied
     }
 
-    fun apply(op: EditOp, acceptSubstitution: Boolean = false): EditOutcome = when (op) {
-        is EditOp.EditParagraph -> editParagraph(op, acceptSubstitution)
+    /** Applies [op]; [acceptWarnings] confirms a [EditOutcome.NeedsConfirmation] answer from a previous call. */
+    fun apply(op: EditOp, acceptWarnings: Boolean = false): EditOutcome = when (op) {
+        is EditOp.EditParagraph -> editParagraph(op, acceptWarnings)
         is EditOp.AddBlankPage -> addBlankPage(op.beforePage)
         is EditOp.DeletePage -> deletePage(op.page)
     }
@@ -137,8 +142,35 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
             return EditOutcome.Rejected(RejectReason.NO_ROOM)
         }
         val warning = plan.warning
-        if (warning != null && !accept) return EditOutcome.NeedsFontConfirmation(warning)
+        val decorationsStay = hasDecorations(p) && layoutChanges(p, current, lines)
+        if (!accept && (warning != null || decorationsStay)) return EditOutcome.NeedsConfirmation(warning, decorationsStay)
         return push(state.copy(edits = edits))
+    }
+
+    /**
+     * Whether graphics (underlines, highlights) are drawn with [p]'s lines. Normal-flow lines carry the graphics
+     * attached to them; inside a unit (tables, columns) only graphics within the paragraph's own text area count.
+     */
+    private fun hasDecorations(p: Paragraph): Boolean {
+        val blocks = p.lineBlocks.filterIsInstance<BlockId.Orig>().distinct().map { m.block(it) }
+        if (blocks.none { it.leafNodes.isNotEmpty() }) return false
+        if (blocks.all { it.kind != BlockKind.UNIT }) return true
+        val runs = p.runNodes.mapNotNull { it.run }.ifEmpty { return false }
+        val size = runs.maxOf { it.effectiveFontSize }
+        val minX = runs.minOf { min(it.originX, it.endX) } - size / 2; val maxX = runs.maxOf { max(it.originX, it.endX) } + size / 2
+        val minY = runs.minOf { lineBottom(it.originY, it.effectiveFontSize) } - size / 2
+        val maxY = runs.maxOf { lineTop(it.originY, it.effectiveFontSize) } + size / 2
+        return blocks.flatMap { it.leafNodes }.any { leaf ->
+            val b = leaf.bounds ?: return@any false
+            b.minX >= minX && b.maxX <= maxX && b.minY >= minY && b.maxY <= maxY
+        }
+    }
+
+    /** Whether laying out [next] gives different line texts (or line count) than the paragraph's [current] spans. */
+    private fun layoutChanges(p: Paragraph, current: List<Span>, next: List<LaidLine>): Boolean {
+        if (current.isEmpty() || m.plan(current) !is FontPlanResult.Ok) return true
+        fun texts(lines: List<LaidLine>) = lines.map { l -> l.fragments.joinToString("") { it.text } }
+        return texts(m.lines(p, current)) != texts(next)
     }
 
     private fun addBlankPage(before: Int): EditOutcome {

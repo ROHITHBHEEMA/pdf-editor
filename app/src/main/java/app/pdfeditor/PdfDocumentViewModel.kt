@@ -21,7 +21,6 @@ import androidx.lifecycle.viewModelScope
 import app.pdfeditor.flow.EditOp
 import app.pdfeditor.flow.EditOutcome
 import app.pdfeditor.flow.EditSession
-import app.pdfeditor.flow.FontWarning
 import app.pdfeditor.flow.OpenResult
 import app.pdfeditor.flow.ParagraphHit
 import app.pdfeditor.flow.RejectReason
@@ -111,7 +110,7 @@ class PdfDocumentViewModel : ViewModel() {
             editing = null,
             draft = null,
             outline = null,
-            fontWarning = null,
+            confirmation = null,
         )
         syncHistory()
     }
@@ -158,7 +157,7 @@ class PdfDocumentViewModel : ViewModel() {
 
     fun cancelEdit() {
         pendingEdit = null
-        state = state.copy(editing = null, draft = null, outline = null, fontWarning = null)
+        state = state.copy(editing = null, draft = null, outline = null, confirmation = null)
     }
 
     fun submitParagraph(newText: String) {
@@ -167,16 +166,17 @@ class PdfDocumentViewModel : ViewModel() {
         runOp(EditOp.EditParagraph(hit.id, newText), accept = false)
     }
 
-    fun confirmSubstitution() {
+    /** The user accepted the font / decoration warning for the pending edit. */
+    fun confirmEdit() {
         val op = pendingEdit ?: return
         pendingEdit = null
-        state = state.copy(fontWarning = null)
+        state = state.copy(confirmation = null)
         runOp(op, accept = true)
     }
 
-    fun cancelSubstitution() {
+    fun cancelConfirmation() {
         pendingEdit = null
-        state = state.copy(fontWarning = null)
+        state = state.copy(confirmation = null)
     }
 
     fun addPageBefore(i: Int) = runOp(EditOp.AddBlankPage(i), showAfter = i)
@@ -208,9 +208,9 @@ class PdfDocumentViewModel : ViewModel() {
                     state = state.copy(busy = null, editing = null, draft = null, outline = null)
                     syncHistory()
                 }
-                is EditOutcome.NeedsFontConfirmation -> {
+                is EditOutcome.NeedsConfirmation -> {
                     pendingEdit = op as? EditOp.EditParagraph
-                    state = state.copy(busy = null, fontWarning = outcome.warning)
+                    state = state.copy(busy = null, confirmation = EditConfirmation(outcome.fontWarning, outcome.decorationsStay))
                 }
                 is EditOutcome.Rejected ->
                     state = state.copy(busy = null, message = rejectMessage(outcome.reason, outcome.detail))
@@ -491,6 +491,9 @@ data class PdfUiState(
     val draft: String? = null,
     /** The tapped paragraph's bounds in bitmap pixels. */
     val outline: Rect? = null,
-    val fontWarning: FontWarning? = null,
+    /** An edit waiting for the user's OK (font substitution and/or decorations that won't move). */
+    val confirmation: EditConfirmation? = null,
     val message: String? = null,
 )
+
+data class EditConfirmation(val fontWarning: app.pdfeditor.flow.FontWarning?, val decorationsStay: Boolean)

@@ -66,13 +66,15 @@ class EditSessionTest {
 
     @Test fun substitutionNeedsConfirmation() {
         val id = idOf("Date: 17 Octobr 2026")
-        assertTrue(s.apply(EditParagraph(id, "Zebra")) is EditOutcome.NeedsFontConfirmation); assertFalse(s.canUndo)
-        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(id, "Zebra"), acceptSubstitution = true))
+        val r = s.apply(EditParagraph(id, "Zebra"))
+        assertTrue(r is EditOutcome.NeedsConfirmation); assertFalse(s.canUndo)
+        assertNotNull((r as EditOutcome.NeedsConfirmation).fontWarning); assertFalse(r.decorationsStay)
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(id, "Zebra"), acceptWarnings = true))
         assertTrue(extractText(saved()).contains("Zebra"))
     }
 
     @Test fun longParagraphFlowsToNewPageAndUndoRemovesIt() {
-        s.apply(EditParagraph(longId, longText.repeat(6)), acceptSubstitution = true)
+        s.apply(EditParagraph(longId, longText.repeat(6)), acceptWarnings = true)
         assertEquals(2, s.pageCount); assertTrue(extractText(saved(), page = 2).contains("Project Coordinater"))
         s.undo(); assertEquals(1, s.pageCount)
         assertEquals(1, PDDocument.load(saved()).use { it.numberOfPages })
@@ -175,7 +177,7 @@ class EditSessionTest {
     }
 
     @Test fun unsupportedCharsRejected() {
-        val r = s.apply(EditParagraph(idOf("Dear Mr. Sharma,"), "Dear 😀"), acceptSubstitution = true)
+        val r = s.apply(EditParagraph(idOf("Dear Mr. Sharma,"), "Dear 😀"), acceptWarnings = true)
         assertEquals(RejectReason.UNSUPPORTED_CHARS, (r as EditOutcome.Rejected).reason)
         assertTrue(r.detail.contains("😀")); assertFalse(s.canUndo)
     }
@@ -404,5 +406,39 @@ class EditSessionTest {
         assertEquals(RejectReason.UNREADABLE, (s.apply(EditParagraph(id, "Menu item")) as EditOutcome.Rejected).reason)
         val hit = s.paragraphAt(0, 80f, 703f)!!
         assertFalse(hit.editable); assertEquals(RejectReason.UNREADABLE, hit.reason)
+    }
+
+    // ---- final fix 4: underlines and highlights stay behind, so ask first ----
+
+    private val underlined = app.pdfeditor.testing.miniPdf(
+        "BT /F1 12 Tf 72 700 Td (Hello world) Tj ET\n0.5 w 72 698 m 140 698 l S\n" +
+            "BT /F1 12 Tf 72 660 Td (Plain line here) Tj ET\n",
+    )
+
+    @Test fun editingDecoratedParagraphNeedsConfirmation() {
+        bytes = underlined
+        val id = idOf("Hello world")
+        val r = s.apply(EditParagraph(id, "Hello there, world"))
+        assertTrue(r is EditOutcome.NeedsConfirmation); assertFalse(s.canUndo)
+        assertTrue((r as EditOutcome.NeedsConfirmation).decorationsStay); assertNull(r.fontWarning)
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(id, "Hello there, world"), acceptWarnings = true))
+        assertTrue(extractText(saved()).replace("\n", " ").contains("Hello there, world"))
+    }
+
+    @Test fun sameLayoutTypoFixInDecoratedParagraphAlsoAsks() {
+        bytes = underlined
+        val r = s.apply(EditParagraph(idOf("Hello world"), "Hello world!"))
+        assertTrue(r is EditOutcome.NeedsConfirmation && r.decorationsStay)
+    }
+
+    @Test fun undecoratedParagraphNeedsNoConfirmation() {
+        bytes = underlined
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(idOf("Plain line here"), "Plain line there")))
+    }
+
+    @Test fun noRoomIsCheckedBeforeConfirmation() {
+        bytes = PdfFixtures.rotated()
+        val r = s.apply(EditParagraph(idOf("Rotated page text"), "Zebra ".repeat(40)))
+        assertEquals(RejectReason.NO_ROOM, (r as EditOutcome.Rejected).reason)
     }
 }

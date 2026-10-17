@@ -10,18 +10,38 @@ import app.pdfeditor.flow.FontWarning
 fun spacedChars(chars: String): String =
     chars.codePoints().toArray().joinToString(" ") { String(Character.toChars(it)) }
 
+const val DECORATIONS_STAY_TEXT =
+    "Underlining or highlighting in this paragraph will stay where it is and won't move with the text."
+
+/** The font dialog's body for [warning]. */
+fun fontWarningText(warning: FontWarning): String =
+    "The original font doesn't include: ${spacedChars(warning.missingChars)}. " +
+        "This paragraph will use ${warning.substituteNames.joinToString(", ")}, which looks similar."
+
+/**
+ * Asks before an edit that substitutes a font ([fontWarning]) and/or leaves underlines and highlights behind
+ * ([decorationsStay]). With a font warning it is the font dialog, with the decoration sentence as a second
+ * paragraph when both apply.
+ */
 @Composable
-fun FontWarningDialog(warning: FontWarning, onUseSimilar: () -> Unit, onCancel: () -> Unit) {
+fun ConfirmEditDialog(fontWarning: FontWarning?, decorationsStay: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    val title: String
+    val body: String
+    val confirm: String
+    if (fontWarning != null) {
+        title = "Font not available"
+        body = fontWarningText(fontWarning) + if (decorationsStay) "\n\n$DECORATIONS_STAY_TEXT" else ""
+        confirm = "Use similar font"
+    } else {
+        title = "Underline won't move"
+        body = DECORATIONS_STAY_TEXT
+        confirm = "Continue"
+    }
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text("Font not available") },
-        text = {
-            Text(
-                "The original font doesn't include: ${spacedChars(warning.missingChars)}. " +
-                    "This paragraph will use ${warning.substituteNames.joinToString(", ")}, which looks similar.",
-            )
-        },
-        confirmButton = { TextButton(onClick = onUseSimilar) { Text("Use similar font") } },
+        title = { Text(title) },
+        text = { Text(body) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirm) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
 }

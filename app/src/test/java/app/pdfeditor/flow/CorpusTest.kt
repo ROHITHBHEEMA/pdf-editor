@@ -60,7 +60,7 @@ class CorpusTest {
             }
             if (target == null) { println("${f.name}: no editable paragraph"); continue }
             open(bytes).use { s ->
-                val outcome = s.apply(EditOp.EditParagraph(target.id, target.text() + " Added sentence for testing."), acceptSubstitution = true)
+                val outcome = s.apply(EditOp.EditParagraph(target.id, target.text() + " Added sentence for testing."), acceptWarnings = true)
                 when (outcome) {
                     is EditOutcome.Applied -> {}
                     is EditOutcome.Rejected ->

@@ -45,7 +45,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.pdfeditor.ui.AboutSheet
 import app.pdfeditor.ui.EditorToolbar
 import app.pdfeditor.ui.FitMode
-import app.pdfeditor.ui.FontWarningDialog
+import app.pdfeditor.ui.ConfirmEditDialog
 import app.pdfeditor.ui.MessageDialog
 import app.pdfeditor.ui.PageIndicator
 import app.pdfeditor.ui.ParagraphEditSheet
@@ -123,7 +123,7 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
     }
 
     val editing = state.editing
-    if (editing != null && state.busy == null && state.fontWarning == null && state.message == null) {
+    if (editing != null && state.busy == null && state.confirmation == null && state.message == null) {
         ParagraphEditSheet(
             key = editing.id,
             initialText = state.draft ?: editing.text,
@@ -131,11 +131,12 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
             onCancel = viewModel::cancelEdit,
         )
     }
-    state.fontWarning?.let { warning ->
-        FontWarningDialog(
-            warning = warning,
-            onUseSimilar = viewModel::confirmSubstitution,
-            onCancel = viewModel::cancelSubstitution,
+    state.confirmation?.let { c ->
+        ConfirmEditDialog(
+            fontWarning = c.fontWarning,
+            decorationsStay = c.decorationsStay,
+            onConfirm = viewModel::confirmEdit,
+            onCancel = viewModel::cancelConfirmation,
         )
     }
     if (showAbout) AboutSheet(onDismiss = { showAbout = false })
