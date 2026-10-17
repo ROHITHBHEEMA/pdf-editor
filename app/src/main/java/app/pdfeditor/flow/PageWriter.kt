@@ -102,8 +102,9 @@ object PageWriter {
             out.emit(op("q"))
             out.emit(matrix(Affine.translate(0f, d.dy)) + op("cm"))
             out.emit(matrix(run.ctm) + op("cm"))
+            // Graphics state in effect at the run (incl. fill set inside its own BT) replaces fillColorTokens.
+            out.emit(renamer.rename(GraphicsStatePrefix.at(sourceTokens, node.startIndex)))
             out.emit(op("BT"))
-            out.emit(renamer.rename(run.fillColorTokens.map(::copyToken)))
             out.emit(renamer.font(COSName.getPDFName(run.fontResourceName))); out.emit(num(run.fontSize)); out.emit(op("Tf"))
             val s = run.state
             out.emit(listOf(num(s.charSpacing), op("Tc"), num(s.wordSpacing), op("Tw"), num(s.horizontalScaling), op("Tz")))
@@ -120,6 +121,7 @@ object PageWriter {
             out.emit(op("q"))
             out.emit(matrix(Affine.translate(0f, d.dy)) + op("cm"))
             out.emit(matrix(leaf.ctm ?: Affine.IDENTITY) + op("cm"))
+            out.emit(renamer.rename(GraphicsStatePrefix.at(sourceTokens, leaf.startIndex)))
             out.emit(renamer.rename(sourceTokens.subList(leaf.startIndex, leaf.endIndex + 1)))
             out.emit(op("Q"))
         }
@@ -239,9 +241,6 @@ object PageWriter {
         if (v == Math.rint(v.toDouble()).toFloat() && kotlin.math.abs(v) < 1e9f) COSInteger.get(v.toLong()) else COSFloat(v)
 
     private fun matrix(m: Affine): List<Any> = listOf(num(m.a), num(m.b), num(m.c), num(m.d), num(m.e), num(m.f))
-
-    /** Fill tokens recorded on a run are COS tokens; strings (from [SpanStyle]) are parsed back. */
-    private fun copyToken(t: Any): Any = if (t is String) parseToken(t) else t
 
     private fun parseToken(s: String): Any = when {
         s.startsWith("/") -> COSName.getPDFName(s.substring(1))

@@ -265,6 +265,28 @@ class PageWriterTest {
         assertEquals(570f, paths[0].bounds!!.minY, 0.01f)
     }
 
+    @Test fun movedUnderlineKeepsStrokeWidthAndColour() {
+        val bytes = miniPdf("q 3 w 1 0 0 RG 72 600 m 300 600 l S Q\n")
+        val saved = PDDocument.load(bytes).use { doc ->
+            val page = doc.getPage(0)
+            val parsed = ContentStreamEngine.parse(page)
+            val path = parsed.leaves.single { it.kind == NodeKind.PATH }
+            PageWriter.write(doc, page, parsed.tokens, listOf(path), listOf(Draw.MoveBlock(lineBlock(emptyList(), listOf(path)), page, -30f)))
+            save(doc)
+        }
+        PDDocument.load(saved).use { d ->
+            val parsed = ContentStreamEngine.parse(d.getPage(0))
+            val paths = parsed.leaves.filter { it.kind == NodeKind.PATH }
+            assertEquals(1, paths.size)
+            assertEquals(570f, paths[0].bounds!!.minY, 0.01f)
+            // The moved block is the last top-level q…Q group; it must re-establish width and colour.
+            val group = parsed.root.children.last()
+            val moved = parsed.tokens.subList(group.startIndex, group.endIndex + 1).joinToString(" ", transform = ::tokStr)
+            assertTrue(moved, moved.contains("3.0 w"))
+            assertTrue(moved, moved.contains("1.0 0.0 0.0 RG"))
+        }
+    }
+
     @Test fun newLineJustifiedTjArray() {
         val saved = PDDocument().use { doc ->
             val page = PDPage(PDRectangle.A4)
