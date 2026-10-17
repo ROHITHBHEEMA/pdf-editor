@@ -23,6 +23,16 @@ class FontResolverTest {
     @Test fun typoFixReusesEmbeddedFont() {
         val r = plan("Date: 17 October 2026") as FontPlanResult.Ok
         assertNull(r.plan.warning)
+        withSample { doc, style ->
+            val text = "Date: 17 October 2026"
+            val ok = FontResolver.plan(doc, listOf(Span(text, style)), TestFontProvider) as FontPlanResult.Ok
+            val bytes = ok.plan.encode(style, text)
+            val font = ok.plan.fontFor(style)
+            val input = java.io.ByteArrayInputStream(bytes)
+            val sb = StringBuilder()
+            while (input.available() > 0) sb.append(font.toUnicode(font.readCode(input)))
+            assertEquals(text, sb.toString())
+        }
     }
 
     @Test fun missingGlyphSubstitutesWholeParagraph() {

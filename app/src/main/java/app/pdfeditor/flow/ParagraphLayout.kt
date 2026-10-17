@@ -4,9 +4,34 @@ import com.tom_roush.pdfbox.pdmodel.font.PDFont
 
 class FontWarning(val missingChars: String, val substituteNames: List<String>)
 
-class FontPlan(private val fonts: Map<SpanStyle, PDFont>, val warning: FontWarning?) {
+class FontPlan(
+    private val fonts: Map<SpanStyle, PDFont>,
+    val warning: FontWarning?,
+    private val observed: ObservedEncodings = ObservedEncodings(),
+) {
     fun fontFor(style: SpanStyle): PDFont =
         fonts[style] ?: throw IllegalArgumentException("No font planned for style ${style.fontResourceName}")
+
+    /** Bytes that show [text] in the planned font for [style]; throws if a character cannot be drawn. */
+    fun encode(style: SpanStyle, text: String): ByteArray {
+        val font = fontFor(style)
+        val out = java.io.ByteArrayOutputStream()
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            i += Character.charCount(cp)
+            val s = String(Character.toChars(cp))
+            val bytes = try { font.encode(s) } catch (_: Exception) { observed.codesFor(font, cp) }
+                ?: throw IllegalArgumentException("Cannot encode '$s' (U+%04X) in font ${font.name}".format(cp))
+            out.write(bytes)
+        }
+        return out.toByteArray()
+    }
+
+    companion object {
+        fun canDraw(font: PDFont, c: String, observed: ObservedEncodings): Boolean =
+            try { font.encode(c); true } catch (_: Exception) { observed.codesFor(font, c.codePointAt(0)) != null }
+    }
 }
 
 /** [spaceAdjust] is the extra page-space width added after each ' ' in [text] (justification). */
