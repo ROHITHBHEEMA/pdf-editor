@@ -32,6 +32,11 @@ class DocumentAnalyzerTest {
         val a = analyze(PdfFixtures.withHeaderFooter(3, List(10) { "Body $it" }))
         a.pages.forEach { pg -> assertTrue(pg.fixedNodes.any { it.run?.text == "Riverside Trust" }) }
         a.pages.forEach { pg -> assertTrue(pg.blocks.none { b -> b.runNodes.any { it.run!!.text.startsWith("Page ") } }) }
+        a.pages.forEachIndexed { i, pg ->
+            assertEquals(10, pg.blocks.count { it.kind == BlockKind.LINE })
+            assertTrue(pg.fixedNodes.any { it.run?.text == "Page ${i + 1}" })
+            assertTrue(pg.fixedNodes.none { it.run?.text == "Body 0" })
+        }
     }
 
     @Test fun rotatedPageIsPinned() { assertEquals(PinReason.ROTATED, analyze(PdfFixtures.rotated()).pages[0].pinned) }
@@ -44,6 +49,23 @@ class DocumentAnalyzerTest {
     }
 
     // --- extra coverage beyond the brief's required tests ---
+
+    @Test fun sampleLetterParagraphGap() {
+        assertEquals(13f, analyze(PdfFixtures.sampleLetter()).paragraphGap, 0.01f)
+    }
+
+    @Test fun everyRunAndLeafIsPlacedExactlyOnce() {
+        val sideText = miniPdf("BT /F1 10 Tf 72 700 Td (Upright) Tj ET\nBT /F1 10 Tf 0 1 -1 0 300 400 Tm (side) Tj ET\n")
+        val docs = listOf(PdfFixtures.sampleLetter(), PdfFixtures.withHeaderFooter(3, List(10) { "Body $it" }),
+            PdfFixtures.twoColumn(List(5) { "left $it" }, List(5) { "right $it" }), sideText)
+        for (bytes in docs) for (p in analyze(bytes).pages) {
+            val expected = p.parsed.leaves.flatMap { if (it.kind == NodeKind.TEXT) it.children else listOf(it) }
+            val placed = p.blocks.flatMap { it.runNodes + it.leafNodes } + p.fixedNodes
+            assertEquals(expected.size, placed.size)
+            assertEquals(expected.map { System.identityHashCode(it) }.toSet(), placed.map { System.identityHashCode(it) }.toSet())
+        }
+        assertEquals(PinReason.ROTATED, analyze(sideText).pages[0].pinned)
+    }
 
     @Test fun paragraphGapIsTheBetweenParagraphGap() {
         // 11pt lines: 16 advance → 5pt gap within paragraphs, 24 advance → 13pt gap between them.

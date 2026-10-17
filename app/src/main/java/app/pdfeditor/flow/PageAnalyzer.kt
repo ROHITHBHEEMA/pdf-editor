@@ -1,6 +1,5 @@
 package app.pdfeditor.flow
 
-import app.pdfeditor.engine.Bounds
 import app.pdfeditor.engine.DrawNode
 import app.pdfeditor.engine.NodeKind
 import app.pdfeditor.engine.ParsedPage
@@ -8,23 +7,6 @@ import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-
-/**
- * A header/footer candidate: a text line (normalised [text], digits → '#', at baseline [y]) or a graphic
- * ([bounds], at its vertical centre [y]) centred in the top or bottom 12% of the page.
- */
-internal class HeaderKey(val text: String?, val bounds: Bounds?, val y: Float) {
-    fun matches(o: HeaderKey): Boolean {
-        if (abs(y - o.y) > TOL) return false
-        if (text != null) return text == o.text
-        val a = bounds ?: return false
-        val b = o.bounds ?: return false
-        return abs(a.minX - b.minX) <= TOL && abs(a.maxX - b.maxX) <= TOL &&
-            abs(a.minY - b.minY) <= TOL && abs(a.maxY - b.maxY) <= TOL
-    }
-
-    private companion object { const val TOL = 2f }
-}
 
 /** Page analysed up to everything that needs document-wide numbers (body area, oversized units). */
 internal class PageDraft(
@@ -45,6 +27,7 @@ internal class PageContent(
     val lines: List<TextLine>,
     val graphics: List<DrawNode>,
     val backgrounds: List<DrawNode>,
+    val unplaced: List<DrawNode>, // leaves/runs without bounds: kept in fixedNodes so nothing is lost
 )
 
 /** Runs sharing one baseline. Non-upright runs each form their own line, sized from their bounds. */
@@ -64,16 +47,18 @@ internal class TextLine(
 /** Turns one parsed page into flow blocks, given the cross-page header/footer keys. */
 internal object PageAnalyzer {
 
-    private const val BAND = 0.12f
     private const val BACKGROUND_AREA = 0.8f
 
     fun extract(pageIndex: Int, mediaBox: PDRectangle, rotation: Int, parsed: ParsedPage): PageContent {
         val runs = parsed.leaves.filter { it.kind == NodeKind.TEXT }.flatMap { it.children }.filter { it.run != null }
         val pageArea = mediaBox.width * mediaBox.height
-        val (backgrounds, graphics) = parsed.leaves
-            .filter { it.kind != NodeKind.TEXT && it.bounds != null }
+        val nonText = parsed.leaves.filter { it.kind != NodeKind.TEXT }
+        val (backgrounds, graphics) = nonText.filter { it.bounds != null }
             .partition { it.bounds!!.width * it.bounds.height > BACKGROUND_AREA * pageArea }
-        return PageContent(pageIndex, mediaBox, rotation, parsed, runs, buildLines(runs), graphics, backgrounds)
+        val unplaced = nonText.filter { it.bounds == null } +
+            runs.filter { !it.run!!.isUpright && it.bounds == null } +
+            parsed.leaves.filter { it.kind == NodeKind.TEXT && it.children.none { r -> r.run != null } }
+        return PageContent(pageIndex, mediaBox, rotation, parsed, runs, buildLines(runs), graphics, backgrounds, unplaced)
     }
 
     private fun buildLines(runs: List<DrawNode>): List<TextLine> {
@@ -108,97 +93,19 @@ internal object PageAnalyzer {
         return lines + rotated
     }
 
-    private fun centreY(top: Float, bottom: Float) = (top + bottom) / 2f
-
-    private fun inBand(c: PageContent, centre: Float): Int {
-        val h = c.mediaBox.height
-        return when {
-            centre > c.mediaBox.upperRightY - BAND * h -> 1
-            centre < c.mediaBox.lowerLeftY + BAND * h -> -1
-            else -> 0
-        }
-    }
-
-    private fun normalise(text: String) = text.map { if (it.isDigit()) '#' else it }.joinToString("").trim()
-
-    private fun lineKey(l: TextLine) = HeaderKey(normalise(l.text), null, l.baseline)
-    private fun graphicKey(g: DrawNode) = HeaderKey(null, g.bounds, centreY(g.bounds!!.maxY, g.bounds.minY))
-
-    /** Header/footer candidates on this page (upright lines and graphics centred in a band). */
-    fun candidates(c: PageContent): List<HeaderKey> =
-        c.lines.filter { it.upright && inBand(c, centreY(it.top, it.bottom)) != 0 }.map(::lineKey) +
-            c.graphics.filter { inBand(c, centreY(it.bounds!!.maxY, it.bounds.minY)) != 0 }.map(::graphicKey)
-
-    /**
-     * [headerKeys] are the keys repeated on at least half of a multi-page document's pages; for a
-     * single-page document ([singlePage]) a band node is a header/footer when it sits at least
-     * 3 × the median line advance away from the body instead.
-     */
-    fun analyze(c: PageContent, headerKeys: List<HeaderKey>, singlePage: Boolean): PageDraft {
-        val headerLines = HashSet<TextLine>()
-        val headerGraphics = HashSet<DrawNode>()
-        var footerTop: Float? = null
-        val bodyLinesForSep = c.lines.filter { inBand(c, centreY(it.top, it.bottom)) == 0 }
-        val bodyGraphicsForSep = c.graphics.filter { inBand(c, centreY(it.bounds!!.maxY, it.bounds.minY)) == 0 }
-        val advance = medianAdvance(bodyLinesForSep)
-        val bodyExtents = bodyLinesForSep.map { it.top to it.bottom } +
-            bodyGraphicsForSep.map { it.bounds!!.maxY to it.bounds.minY }
-
-        fun isHeader(key: HeaderKey, band: Int, top: Float, bottom: Float): Boolean =
-            if (!singlePage) headerKeys.any { it.matches(key) }
-            else separated(band, top, bottom, bodyExtents, advance)
-
-        for (l in c.lines) {
-            if (!l.upright) continue
-            val band = inBand(c, centreY(l.top, l.bottom))
-            if (band != 0 && isHeader(lineKey(l), band, l.top, l.bottom)) {
-                headerLines += l
-                if (band < 0) footerTop = max(footerTop ?: l.top, l.top)
-            }
-        }
-        for (g in c.graphics) {
-            val b = g.bounds!!
-            val band = inBand(c, centreY(b.maxY, b.minY))
-            if (band != 0 && isHeader(graphicKey(g), band, b.maxY, b.minY)) {
-                headerGraphics += g
-                if (band < 0) footerTop = max(footerTop ?: b.maxY, b.maxY)
-            }
-        }
-
-        val bodyLines = c.lines.filter { it !in headerLines }
-        val bodyGraphics = c.graphics.filter { it !in headerGraphics }
+    /** Builds the page's body blocks with [headers] set aside as fixed nodes, plus the first three pin reasons. */
+    fun draft(c: PageContent, headers: HeaderSet): PageDraft {
+        val bodyLines = c.lines.filter { it !in headers.lines }
+        val bodyGraphics = c.graphics.filter { it !in headers.graphics }
         val blocks = buildBlocks(c.pageIndex, bodyLines, bodyGraphics)
-        val fixed = c.backgrounds + headerGraphics + headerLines.flatMap { it.runs }
-
+        val fixed = c.backgrounds + c.unplaced + headers.graphics + headers.lines.flatMap { it.runs }
         val pinned = when {
             c.runs.any { it.run!!.state.renderMode == 3 } -> PinReason.SCANNED_TEXT
             c.parsed.hasTextInForms -> PinReason.TEXT_IN_FORM
-            ((c.rotation % 360) + 360) % 360 != 0 || bodyLines.any { !it.upright } -> PinReason.ROTATED
+            ((c.rotation % 360) + 360) % 360 != 0 || c.runs.any { !it.run!!.isUpright } -> PinReason.ROTATED
             else -> null
         }
-        return PageDraft(c, blocks, fixed, footerTop, pinned)
-    }
-
-    private fun medianAdvance(lines: List<TextLine>): Float? {
-        val baselines = lines.filter { it.upright }.map { it.baseline }.sortedDescending()
-        val advances = baselines.zipWithNext { a, b -> a - b }.filter { it > 0f }
-        return if (advances.isEmpty()) null else median(advances)
-    }
-
-    /** Edge-to-edge distance from a band node to the nearest body element on its inner side ≥ 3 × advance. */
-    private fun separated(band: Int, top: Float, bottom: Float, body: List<Pair<Float, Float>>, advance: Float?): Boolean {
-        if (advance == null) return false
-        val centre = centreY(top, bottom)
-        val gap = if (band > 0) {
-            val below = body.filter { centreY(it.first, it.second) < centre }
-            if (below.isEmpty()) return false
-            bottom - below.maxOf { it.first }
-        } else {
-            val above = body.filter { centreY(it.first, it.second) > centre }
-            if (above.isEmpty()) return false
-            above.minOf { it.second } - top
-        }
-        return gap >= 3f * advance
+        return PageDraft(c, blocks, fixed, HeaderFooter.footerTop(c, headers), pinned)
     }
 
     private sealed class Element {
