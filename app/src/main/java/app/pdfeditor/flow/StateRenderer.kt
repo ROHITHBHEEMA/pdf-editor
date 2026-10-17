@@ -247,6 +247,13 @@ internal object StateRenderer {
         }
         for ((o, tokens, work) in jobs) PageWriter.write(out, outputPages[o], tokens, work.first, work.second)
 
+        // Deleted original pages may still be referenced (outlines, structure tree, form widgets): scrub them.
+        if (!sameTree) {
+            val kept: MutableSet<PDPage> = java.util.Collections.newSetFromMap(java.util.IdentityHashMap())
+            kept += outputPages
+            DeletedPages.scrub(out, orig.filter { it !in kept })
+        }
+
         ByteArrayOutputStream().also { out.save(it) }.toByteArray()
     }
 

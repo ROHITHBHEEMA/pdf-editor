@@ -326,4 +326,73 @@ class EditSessionTest {
         assertEquals(EditOutcome.Applied, s.apply(EditParagraph(p.id, p.text().replace("Sharmaa", "Sharma")), true))
         assertEquals(listOf("Priya Sharma", sig[1]), runs(saved()).sortedByDescending { it.originY }.map { it.text })
     }
+
+    // ---- final fix 2: a deleted page's content leaves the saved file ----
+
+    /**
+     * Two Helvetica pages (so text is plain ASCII in the streams); page 2 holds [secret] and is referenced by an
+     * outline item, a named destination, a structure-like catalog entry and a form field whose only widget is on it.
+     */
+    private fun referencedSecondPage(secret: String): ByteArray = PDDocument().use { doc ->
+        val font = com.tom_roush.pdfbox.pdmodel.font.PDType1Font.HELVETICA
+        val pages = List(2) { i ->
+            com.tom_roush.pdfbox.pdmodel.PDPage(com.tom_roush.pdfbox.pdmodel.common.PDRectangle.A4).also { pg ->
+                doc.addPage(pg)
+                com.tom_roush.pdfbox.pdmodel.PDPageContentStream(doc, pg).use { cs ->
+                    cs.beginText(); cs.setFont(font, 11f); cs.newLineAtOffset(72f, 700f)
+                    cs.showText(if (i == 0) "Front page text" else "Back page $secret"); cs.endText()
+                }
+            }
+        }
+        val dest = com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitDestination().apply { page = pages[1] }
+        val outline = com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline()
+        doc.documentCatalog.documentOutline = outline
+        for ((title, target) in listOf("Front" to pages[0], "Back" to pages[1])) {
+            outline.addLast(com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem().apply {
+                this.title = title
+                destination = com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitDestination().apply { page = target }
+            })
+        }
+        val names = com.tom_roush.pdfbox.pdmodel.PDDocumentNameDestinationDictionary(com.tom_roush.pdfbox.cos.COSDictionary())
+        doc.documentCatalog.cosObject.setItem(com.tom_roush.pdfbox.cos.COSName.DESTS, names.cosObject)
+        names.cosObject.setItem("back", dest)
+        doc.documentCatalog.cosObject.setItem("StructLike", com.tom_roush.pdfbox.cos.COSDictionary().apply {
+            setItem(com.tom_roush.pdfbox.cos.COSName.PG, pages[1])
+        })
+        val form = com.tom_roush.pdfbox.pdmodel.interactive.form.PDAcroForm(doc)
+        doc.documentCatalog.acroForm = form
+        val field = com.tom_roush.pdfbox.pdmodel.interactive.form.PDTextField(form).apply { partialName = "f" }
+        field.cosObject.setString(com.tom_roush.pdfbox.cos.COSName.V, secret)
+        val widget = field.widgets[0]
+        widget.rectangle = com.tom_roush.pdfbox.pdmodel.common.PDRectangle(72f, 600f, 200f, 20f)
+        widget.page = pages[1]
+        pages[1].annotations = listOf(widget)
+        form.fields = listOf(field)
+        ByteArrayOutputStream().also { doc.save(it) }.toByteArray()
+    }
+
+    @Test fun deletedPageLeavesNoTraceInSavedFile() {
+        val secret = "SECRETWORD40"
+        bytes = referencedSecondPage(secret)
+        assertTrue(extractText(bytes).contains(secret))
+        assertEquals(EditOutcome.Applied, s.apply(DeletePage(1)))
+        val out = saved()
+        assertFalse(String(out, Charsets.ISO_8859_1).contains(secret))
+        PDDocument.load(out).use { doc ->
+            assertEquals(1, doc.numberOfPages)
+            for (o in doc.document.objects) {
+                val obj = o.`object`
+                if (obj is com.tom_roush.pdfbox.cos.COSStream) {
+                    val text = obj.createInputStream().use { String(it.readBytes(), Charsets.ISO_8859_1) }
+                    assertFalse("stream ${o.objectNumber} keeps the deleted text", text.contains(secret))
+                }
+                if (obj is com.tom_roush.pdfbox.cos.COSString) assertFalse(obj.string.contains(secret))
+            }
+            val items = generateSequence(doc.documentCatalog.documentOutline?.firstChild) { it.nextSibling }.toList()
+            assertEquals(listOf("Front"), items.map { it.title })
+            assertEquals(0, doc.pages.indexOf(items[0].findDestinationPage(doc)))
+            assertTrue(doc.documentCatalog.acroForm?.fields.orEmpty().isEmpty())
+            assertTrue(extractText(out).contains("Front page text"))
+        }
+    }
 }
