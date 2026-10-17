@@ -2,6 +2,7 @@ package app.pdfeditor.flow
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,5 +47,19 @@ class StyleMapperTest {
         assertEquals(1, out.size)
         assertEquals("a😀b", out[0].text)
         assertSame(B, out[0].style)
+    }
+
+    @Test fun emptyOldWithTextThrows() {
+        assertThrows(IllegalArgumentException::class.java) { StyleMapper.apply(emptyList(), "x") }
+        assertTrue(StyleMapper.apply(emptyList(), "").isEmpty())
+    }
+
+    @Test fun longParagraphMiddleChangeKeepsStyles() {
+        val old = listOf(Span("a".repeat(1000), R), Span("b".repeat(10) + "q" + "b".repeat(10), B), Span("c".repeat(1979), R))
+        val newText = "a".repeat(1000) + "b".repeat(10) + "z" + "b".repeat(10) + "c".repeat(1979)
+        val out = StyleMapper.apply(old, newText)
+        assertEquals(newText, out.joinToString("") { it.text })
+        assertEquals(listOf(R, B, R), out.map { it.style })
+        assertEquals("b".repeat(10) + "z" + "b".repeat(10), out[1].text)
     }
 }
