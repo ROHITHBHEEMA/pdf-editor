@@ -185,7 +185,7 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         val edited = state.edits[p.id]
         val spans = if (edited == null) {
             val order = p.lineBlocks.withIndex().associate { (i, b) -> b to i }
-            ParagraphDetector.spansOf(kept.sortedBy { order[it] }.map { m.block(it as BlockId.Orig).runNodes })
+            ParagraphDetector.spansOf(kept.sortedBy { order[it] }.map { m.block(it as BlockId.Orig).runNodes }, p)
         } else {
             val laid = m.lines(p, edited)
             joinLines(kept.map { (it as BlockId.Edited).line }.sorted().map { laid[it] })

@@ -51,6 +51,7 @@ object ParagraphDetector {
     private const val GAP_RATIO_TOL = 0.1f
     private const val MAX_GAP_IN_SIZES = 1.5f
     private const val SPACE_GAP_IN_SIZES = 0.2f
+    private const val EDGE_FIT = 0.01f // page units of rounding slack for "the next word would have fit"
     private const val COLUMN_GAP_IN_SIZES = 1.5f // x gap that splits a UNIT row into separate column pieces
 
     /** One visual text line: its runs left to right plus the geometry the join rules use. */
@@ -205,7 +206,7 @@ object ParagraphDetector {
         val firstLineIndent =
             if (n >= 2 && (alignment == Alignment.LEFT || alignment == Alignment.JUSTIFIED)) max(0f, first.left - lines[1].left) else 0f
 
-        val spans = buildSpans(lines)
+        val spans = buildSpans(lines, Geometry(left, right, firstLineIndent))
         val id = ParagraphId(page.pageIndex, lines[0].blockIndex, sub)
         val text = spans.joinToString("") { it.text }
         return Paragraph(
@@ -214,11 +215,54 @@ object ParagraphDetector {
         )
     }
 
-    /** Spans of whole visual lines (each a list of run nodes), built exactly as a detected paragraph's spans. */
-    internal fun spansOf(lines: List<List<DrawNode>>): List<Span> =
-        buildSpans(lines.filter { l -> l.any { it.run != null } }.map { l -> Line(l.filter { it.run != null }.sortedBy { it.run!!.originX }, BlockId.Orig(-1, -1), -1) })
+    /** Paragraph box the hard-break test measures against. */
+    private class Geometry(val left: Float, val right: Float, val firstLineIndent: Float)
 
-    private fun buildSpans(lines: List<Line>): List<Span> {
+    /**
+     * Spans of whole visual lines (each a list of run nodes), built exactly as a detected paragraph's spans; the
+     * hard-break test uses [p]'s box.
+     */
+    internal fun spansOf(lines: List<List<DrawNode>>, p: Paragraph): List<Span> =
+        buildSpans(
+            lines.filter { l -> l.any { it.run != null } }.map { l -> Line(l.filter { it.run != null }.sortedBy { it.run!!.originX }, BlockId.Orig(-1, -1), -1) },
+            Geometry(p.left, p.right, p.firstLineIndent),
+        )
+
+    /**
+     * True when [prev] ended with a hard line break: the next line's first word (plus a space) would still have fit
+     * on [prev] inside the paragraph box. Unmeasurable widths count as a hard break.
+     */
+    private fun hardBreak(prev: Line, next: Line, isFirst: Boolean, g: Geometry): Boolean {
+        val run = next.runs[0]
+        val word = run.text.trimStart().takeWhile { !it.isWhitespace() }
+        if (word.isEmpty()) return false
+        val last = prev.runs.last()
+        return try {
+            val wordW = measure(word, run) ?: return true
+            val spaceW = if (last.text.endsWith(" ")) 0f else measure(" ", last) ?: return true
+            val avail = g.right - g.left - (if (isFirst) g.firstLineIndent else 0f)
+            (prev.right - prev.left) + spaceW + wordW <= avail + EDGE_FIT
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /** Page-space width of [text] in [run]'s font and state, or null when the font can't measure it. */
+    private fun measure(text: String, run: TextRunInfo): Float? {
+        val font = run.font ?: return null
+        val style = styleOf(run)
+        return try {
+            ParagraphLayout.textWidth(text, style, font)
+        } catch (_: Exception) {
+            // Subset fonts with a built-in encoding can't encode: measure through the font's own code → Unicode map.
+            val widths = GlyphWidths.of(font)
+            var glyphs = 0f
+            for (c in text) glyphs += widths[c] ?: return null
+            glyphs / 1000f * style.effectiveFontSize * style.horizontalScale + style.charSpacing * text.length
+        }
+    }
+
+    private fun buildSpans(lines: List<Line>, g: Geometry): List<Span> {
         val spans = ArrayList<Span>()
         fun append(text: String, style: SpanStyle) {
             if (text.isEmpty()) return
@@ -231,8 +275,21 @@ object ParagraphDetector {
             val last = spans.lastOrNull() ?: return
             if (!last.text.endsWith(" ") && !next.firstOrNull().let { it != null && it.isWhitespace() }) spans[spans.lastIndex] = Span(last.text + " ", last.style)
         }
+        fun appendBreak() {
+            val last = spans.lastOrNull() ?: return
+            spans[spans.lastIndex] = Span(last.text.trimEnd(' ') + "\n", last.style)
+        }
+        val hard = BooleanArray(lines.size) { li -> li > 0 && hardBreak(lines[li - 1], lines[li], li == 1, g) }
+        if (hard.any { it }) {
+            // A block with hard breaks (address, list): its widest line can't be tested (nothing fits past the box
+            // edge it defines), so it breaks hard too.
+            val widest = lines.maxOf { it.right }
+            for (li in 1 until lines.size) if (lines[li - 1].right >= widest - EDGE_TOL) hard[li] = true
+        }
         lines.forEachIndexed { li, line ->
-            if (li > 0) appendSpace(line.runs[0].text)
+            if (li > 0) {
+                if (hard[li]) appendBreak() else appendSpace(line.runs[0].text)
+            }
             line.runs.forEachIndexed { ri, r ->
                 if (ri > 0) {
                     val gap = r.originX - line.runs[ri - 1].endX
@@ -256,5 +313,22 @@ object ParagraphDetector {
         is Operator -> t.name
         is COSName -> "/" + t.name
         else -> t.toString()
+    }
+}
+
+/** Per font, glyph-space width of each character the font maps back to Unicode (cached by font dictionary). */
+internal object GlyphWidths {
+    private val cache = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Map<Char, Float>>())
+
+    fun of(font: PDFont): Map<Char, Float> = cache.getOrPut(font.cosObject) {
+        val out = HashMap<Char, Float>()
+        val maxCode = if (font is com.tom_roush.pdfbox.pdmodel.font.PDType0Font) 0xFFFF else 0xFF
+        for (code in 0..maxCode) {
+            val u = try { font.toUnicode(code) } catch (_: Exception) { null } ?: continue
+            if (u.length != 1 || u[0] in out) continue
+            val w = try { font.getWidth(code) } catch (_: Exception) { continue }
+            if (w > 0f || u[0] == ' ') out[u[0]] = w
+        }
+        out
     }
 }

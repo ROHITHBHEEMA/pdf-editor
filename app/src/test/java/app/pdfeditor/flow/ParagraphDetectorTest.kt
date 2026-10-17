@@ -89,4 +89,19 @@ class ParagraphDetectorTest {
         val ps = detect(PdfFixtures.rotated())
         assertTrue(ps.isNotEmpty()); assertTrue(ps.none { it.canGrow })
     }
+
+    // ---- final fix 1: hard line breaks in address / signature blocks ----
+
+    private val address = listOf("Jonh Smith", "12 Main Street, Apartment 4B", "Springfield, IL 62704", "Phone 555 0100")
+
+    @Test fun addressBlockKeepsHardBreaks() {
+        val p = detect(PdfFixtures.positioned(address.mapIndexed { i, t -> Triple(t, 72f, top - 14f * i) })).single()
+        assertEquals(address.joinToString("\n"), p.text())
+    }
+
+    @Test fun sampleLetterLongParagraphHasNoHardBreaks() {
+        val p = detect(PdfFixtures.sampleLetter()).single { it.text().startsWith("The construction team") }
+        assertFalse(p.text().contains('\n'))
+        assertTrue(detect(PdfFixtures.letter(listOf("word ".repeat(80)))).none { it.text().contains('\n') })
+    }
 }

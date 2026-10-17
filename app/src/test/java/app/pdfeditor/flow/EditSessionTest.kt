@@ -305,4 +305,25 @@ class EditSessionTest {
         assertEquals(EditOutcome.Applied, s.apply(EditParagraph(longId, hit.text + " more"), true))
         assertFalse(extractText(saved()).contains("official opening"))
     }
+
+    // ---- final fix 1: typo fixes keep hard line breaks ----
+
+    private fun block(lines: List<String>, x: Float = 72f, top: Float = 700f, step: Float = 14f) =
+        PdfFixtures.positioned(lines.mapIndexed { i, t -> Triple(t, x, top - step * i) })
+
+    @Test fun fixingTypoInAddressBlockKeepsItsLines() {
+        val address = listOf("Jonh Smith", "12 Main Street, Apartment 4B", "Springfield, IL 62704", "Phone 555 0100")
+        bytes = block(address)
+        val p = paragraphs().single()
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(p.id, p.text().replace("Jonh", "John")), true))
+        assertEquals(listOf("John Smith") + address.drop(1), runs(saved()).sortedByDescending { it.originY }.map { it.text })
+    }
+
+    @Test fun fixingTypoInSignatureBlockKeepsItsLines() {
+        val sig = listOf("Priya Sharmaa", "Project Coordinator, Riverside Library Trust")
+        bytes = block(sig, step = 13f)
+        val p = paragraphs().single()
+        assertEquals(EditOutcome.Applied, s.apply(EditParagraph(p.id, p.text().replace("Sharmaa", "Sharma")), true))
+        assertEquals(listOf("Priya Sharma", sig[1]), runs(saved()).sortedByDescending { it.originY }.map { it.text })
+    }
 }
