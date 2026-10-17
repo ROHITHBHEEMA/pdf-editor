@@ -14,15 +14,15 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "SVS.pdfinspector"
+    namespace = "app.pdfeditor"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "SVS.pdfinspector"
+        applicationId = "app.pdfeditor"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.2"
+        versionCode = 1
+        versionName = "0.1.0"
     }
 
     dependenciesInfo {

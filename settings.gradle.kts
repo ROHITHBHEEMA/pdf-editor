@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PdfInspector"
+rootProject.name = "PdfEditor"
 include(":app")

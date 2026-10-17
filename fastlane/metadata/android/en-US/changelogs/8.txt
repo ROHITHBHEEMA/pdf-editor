@@ -1,2 +1,0 @@
-- improve inline text editor
-- more fonts support added!!!

@@ -1,0 +1,43 @@
+package app.pdfeditor.engine
+
+import app.pdfeditor.testing.miniPdf
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ContentStreamEngineTest {
+
+    @Test
+    fun parsesTextImageAndPath() {
+        val doc = PDDocument.load(samplePdf())
+        val page = doc.getPage(0)
+        val parsed = ContentStreamEngine.parse(page)
+
+        val kinds = parsed.leaves.map { it.kind }
+        assertTrue("expected a text node", kinds.contains(NodeKind.TEXT))
+        assertTrue("expected a path node", kinds.contains(NodeKind.PATH))
+
+        val text = parsed.leaves.first { it.kind == NodeKind.TEXT }
+        assertTrue("text label should carry preview", text.label.contains("Hello World"))
+        assertTrue("token range should be ordered", text.startIndex <= text.endIndex)
+        assertTrue("text should have bounds", text.bounds != null)
+
+        doc.close()
+    }
+
+    @Test
+    fun textRunCarriesFontResourceAndSize() {
+        val doc = PDDocument.load(samplePdf())
+        val parsed = ContentStreamEngine.parse(doc.getPage(0))
+        val textObj = parsed.leaves.first { it.kind == NodeKind.TEXT }
+        val run = textObj.children.first { it.kind == NodeKind.TEXT }
+        assertEquals("F1", run.fontResourceName)
+        assertEquals(24f, run.fontSize, 1e-4f)
+        doc.close()
+    }
+
+    private fun samplePdf(): ByteArray = miniPdf(
+        "BT /F1 24 Tf 100 700 Td (Hello World) Tj ET\n1 0 0 rg\n50 50 200 100 re f\n",
+    )
+}
