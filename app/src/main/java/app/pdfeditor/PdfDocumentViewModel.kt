@@ -277,6 +277,7 @@ class PdfDocumentViewModel : ViewModel() {
             }
             if (ok) {
                 state = state.copy(busy = null)
+                syncHistory()
                 Toast.makeText(app, "Saved a copy", Toast.LENGTH_SHORT).show()
             } else {
                 fail(SOMETHING_WRONG)
@@ -297,7 +298,7 @@ class PdfDocumentViewModel : ViewModel() {
 
     private fun syncHistory() {
         val s = session
-        state = state.copy(canUndo = s?.canUndo == true, canRedo = s?.canRedo == true)
+        state = state.copy(canUndo = s?.canUndo == true, canRedo = s?.canRedo == true, isModified = s?.isModified == true)
     }
 
     private fun rejectMessage(reason: RejectReason, detail: String): String = when (reason) {
@@ -485,6 +486,8 @@ data class PdfUiState(
     val documentToken: Int = 0,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
+    /** The document has edits that haven't been saved. */
+    val isModified: Boolean = false,
     /** The paragraph whose edit sheet is open. */
     val editing: ParagraphHit? = null,
     /** What the user last submitted for [editing], kept so the sheet reopens with it after a dialog. */

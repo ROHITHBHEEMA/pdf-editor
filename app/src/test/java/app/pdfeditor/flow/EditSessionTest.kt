@@ -441,4 +441,24 @@ class EditSessionTest {
         val r = s.apply(EditParagraph(idOf("Rotated page text"), "Zebra ".repeat(40)))
         assertEquals(RejectReason.NO_ROOM, (r as EditOutcome.Rejected).reason)
     }
+
+    // ---- final fix 5: unsaved changes are tracked ----
+
+    @Test fun isModifiedFollowsEditsUndoAndSave() {
+        assertFalse(s.isModified)
+        val id = idOf("Date: 17 Octobr 2026")
+        s.apply(EditParagraph(id, "Date: 17 October 2026")); assertTrue(s.isModified)
+        s.undo(); assertFalse(s.isModified)
+        s.redo(); assertTrue(s.isModified)
+        saved(); assertFalse(s.isModified)
+        s.undo(); assertTrue(s.isModified) // back to the opened text, which differs from what was saved
+        s.redo(); assertFalse(s.isModified)
+        s.apply(AddBlankPage(0)); assertTrue(s.isModified)
+    }
+
+    @Test fun rejectedOrPendingEditIsNotAModification() {
+        val id = idOf("Date: 17 Octobr 2026")
+        assertTrue(s.apply(EditParagraph(id, "Zebra")) is EditOutcome.NeedsConfirmation)
+        assertFalse(s.isModified)
+    }
 }

@@ -54,3 +54,18 @@ fun MessageDialog(message: String, onDismiss: () -> Unit) {
         confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
     )
 }
+
+const val DISCARD_DOCUMENT_TEXT = "Your edits haven't been saved. If you continue, they'll be lost."
+const val DISCARD_PARAGRAPH_TEXT = "Your changes to this paragraph will be lost."
+
+/** "Discard your changes?" with [body]; Discard runs [onDiscard], Keep editing (or dismissing) runs [onKeep]. */
+@Composable
+fun DiscardDialog(body: String, onDiscard: () -> Unit, onKeep: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onKeep,
+        title = { Text("Discard your changes?") },
+        text = { Text(body) },
+        confirmButton = { TextButton(onClick = onDiscard) { Text("Discard") } },
+        dismissButton = { TextButton(onClick = onKeep) { Text("Keep editing") } },
+    )
+}

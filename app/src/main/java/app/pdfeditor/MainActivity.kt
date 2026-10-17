@@ -3,7 +3,9 @@ package app.pdfeditor
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.app.Activity
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -46,6 +48,8 @@ import app.pdfeditor.ui.AboutSheet
 import app.pdfeditor.ui.EditorToolbar
 import app.pdfeditor.ui.FitMode
 import app.pdfeditor.ui.ConfirmEditDialog
+import app.pdfeditor.ui.DISCARD_DOCUMENT_TEXT
+import app.pdfeditor.ui.DiscardDialog
 import app.pdfeditor.ui.MessageDialog
 import app.pdfeditor.ui.PageIndicator
 import app.pdfeditor.ui.ParagraphEditSheet
@@ -88,7 +92,12 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
         uri?.let { viewModel.saveCopy(context, it) }
     }
     var showAbout by remember { mutableStateOf(false) }
+    // What to do once the user agrees to throw away unsaved edits (open another file, or leave the app).
+    var discardThen by remember { mutableStateOf<(() -> Unit)?>(null) }
     fun pickPdf() = openLauncher.launch(arrayOf("application/pdf"))
+    fun openOther() = if (state.isModified) discardThen = { pickPdf() } else pickPdf()
+
+    BackHandler(enabled = state.isModified) { discardThen = { (context as? Activity)?.finish() } }
 
     Box(Modifier.fillMaxSize()) {
         if (state.hasDocument) {
@@ -97,7 +106,7 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
                     fileName = state.fileName,
                     canUndo = state.canUndo,
                     canRedo = state.canRedo,
-                    onOpen = ::pickPdf,
+                    onOpen = ::openOther,
                     onUndo = viewModel::undo,
                     onRedo = viewModel::redo,
                     onAddPageBefore = { viewModel.addPageBefore(state.pageIndex) },
@@ -140,6 +149,13 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
         )
     }
     if (showAbout) AboutSheet(onDismiss = { showAbout = false })
+    discardThen?.let { then ->
+        DiscardDialog(
+            body = DISCARD_DOCUMENT_TEXT,
+            onDiscard = { discardThen = null; then() },
+            onKeep = { discardThen = null },
+        )
+    }
     state.message?.let { MessageDialog(it, onDismiss = viewModel::dismissMessage) }
 }
 

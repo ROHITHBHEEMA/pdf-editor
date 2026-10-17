@@ -77,6 +77,12 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
     private fun flow(): StateFlow = flowCache?.takeIf { it.state == state } ?: StateRenderer.flow(m, state).also { flowCache = it }
 
     val pageCount: Int get() = flow().result.slots.size
+    /** State at open or at the last successful save. */
+    private var savedState = state
+
+    /** True when the current state differs from the state at open or at the last successful save. */
+    val isModified: Boolean get() = state != savedState
+
     val canUndo: Boolean get() = undoStack.isNotEmpty()
     val canRedo: Boolean get() = redoStack.isNotEmpty()
 
@@ -86,8 +92,12 @@ class EditSession private constructor(private val m: SessionModel) : Closeable {
         return StateRenderer.render(m, flow()).also { renderCache = state to it }
     }
 
-    /** Full save of the current state. */
-    fun save(out: OutputStream) = out.write(renderedBytes())
+    /** Full save of the current state; on success it becomes the unmodified baseline. */
+    fun save(out: OutputStream) {
+        val saving = state
+        out.write(renderedBytes())
+        savedState = saving
+    }
 
     fun undo() {
         val prev = undoStack.removeLastOrNull() ?: return

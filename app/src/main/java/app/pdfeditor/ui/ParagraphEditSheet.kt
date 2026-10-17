@@ -15,12 +15,14 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -41,9 +43,24 @@ fun ParagraphEditSheet(
     onDone: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var value by remember(key) { mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length))) }
+    var askDiscard by remember(key) { mutableStateOf(false) }
+    val changed by rememberUpdatedState(value.text != initialText)
+    // Swiping the sheet away (or tapping outside, or Back) with changed text asks first instead of hiding.
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { target ->
+            if (target == SheetValue.Hidden && changed) { askDiscard = true; false } else true
+        },
+    )
     val focus = remember { FocusRequester() }
+    if (askDiscard) {
+        DiscardDialog(
+            body = DISCARD_PARAGRAPH_TEXT,
+            onDiscard = { askDiscard = false; onCancel() },
+            onKeep = { askDiscard = false },
+        )
+    }
     ModalBottomSheet(onDismissRequest = onCancel, sheetState = sheetState) {
         Column(
             Modifier
