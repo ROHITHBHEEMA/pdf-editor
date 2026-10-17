@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.pdfeditor.ui.AboutSheet
 import app.pdfeditor.ui.EditorToolbar
 import app.pdfeditor.ui.FitMode
 import app.pdfeditor.ui.FontWarningDialog
@@ -86,6 +87,7 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
     val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         uri?.let { viewModel.saveCopy(context, it) }
     }
+    var showAbout by remember { mutableStateOf(false) }
     fun pickPdf() = openLauncher.launch(arrayOf("application/pdf"))
 
     Box(Modifier.fillMaxSize()) {
@@ -102,6 +104,7 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
                     onAddPageAfter = { viewModel.addPageAfter(state.pageIndex) },
                     onDeletePage = viewModel::deleteCurrentPage,
                     onSave = { saveLauncher.launch(viewModel.suggestedCopyName()) },
+                    onAbout = { showAbout = true },
                 )
                 PageView(viewModel, state, Modifier.weight(1f).fillMaxWidth())
                 PageIndicator(
@@ -135,6 +138,7 @@ fun EditorScreen(initialUri: Uri? = null, viewModel: PdfDocumentViewModel = view
             onCancel = viewModel::cancelSubstitution,
         )
     }
+    if (showAbout) AboutSheet(onDismiss = { showAbout = false })
     state.message?.let { MessageDialog(it, onDismiss = viewModel::dismissMessage) }
 }
 

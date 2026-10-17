@@ -43,6 +43,7 @@ fun EditorToolbar(
     onAddPageAfter: () -> Unit,
     onDeletePage: () -> Unit,
     onSave: () -> Unit,
+    onAbout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -81,6 +82,7 @@ fun EditorToolbar(
                 Spacer(Modifier.width(6.dp))
                 Text("Save copy", maxLines = 1)
             }
+            OverflowMenu(onAbout = onAbout)
         }
     }
 }

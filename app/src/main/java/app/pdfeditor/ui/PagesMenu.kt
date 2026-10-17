@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import compose.icons.TablerIcons
+import compose.icons.tablericons.DotsVertical
 import compose.icons.tablericons.FileMinus
 import compose.icons.tablericons.FilePlus
 import compose.icons.tablericons.Files
@@ -42,6 +43,23 @@ fun PagesMenu(onAddBefore: () -> Unit, onAddAfter: () -> Unit, onDelete: () -> U
                 text = { Text("Delete this page") },
                 leadingIcon = { Icon(TablerIcons.FileMinus, null, Modifier.size(20.dp)) },
                 onClick = { expanded = false; onDelete() },
+            )
+        }
+    }
+}
+
+/** The overflow (three dots) button; currently holds "About". */
+@Composable
+fun OverflowMenu(onAbout: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(TablerIcons.DotsVertical, "More options", Modifier.size(22.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("About") },
+                onClick = { expanded = false; onAbout() },
             )
         }
     }

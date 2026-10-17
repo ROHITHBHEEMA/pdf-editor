@@ -1,53 +1,91 @@
-<p align="center">
-  <img src="fastlane/metadata/android/en-US/images/icon.png" width="80" alt="PDF Inspector icon" />
-</p>
+# PDF Editor
 
-<h1 align="center">PDF Inspector</h1>
+An Android app that lets you open a PDF, tap a paragraph, retype it, and save a new copy. It works fully
+offline: it asks for no permissions, has no internet access, and your files never leave your phone.
 
-<p align="center">
-  A DevTools-style element inspector and editor for PDFs on Android
-</p>
+What it does:
 
-<p align="center">
-  <a href="https://github.com/shardulvs/pdfinspector-android/releases/latest"><img src="https://img.shields.io/github/v/release/shardulvs/pdfinspector-android?style=flat-square&label=release&color=blue" alt="Release" /></a>
-  <a href="https://f-droid.org/en/packages/SVS.pdfinspector"><img src="https://img.shields.io/f-droid/v/SVS.pdfinspector?style=flat-square" alt="F-Droid" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange?style=flat-square" alt="License" /></a>
-  <img src="https://img.shields.io/badge/Android-8.0%2B-3ddc84?style=flat-square&logo=android&logoColor=white" alt="Android 8.0+" />
-  <a href="https://github.com/sponsors/shardulvs"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ec6cb9?style=flat-square&logo=githubsponsors&logoColor=white" alt="Sponsor" /></a>
-</p>
+- Open a PDF from your phone (through the normal Android file picker).
+- Tap a paragraph to edit its text. The paragraph is re-flowed and the rest of the page moves with it.
+- Add a blank page or delete a page.
+- Undo and redo.
+- "Save copy" writes a **new** file. Your original file is never changed.
 
-<p align="center">
-  <a href="https://github.com/shardulvs/pdfinspector-android/releases/latest">GitHub Releases</a>
-</p>
+Version 1 edits English (Latin-script) text only. Text in other languages is left untouched.
 
----
+## What you need on your computer
 
-## At a glance
+Everything below is for building the app yourself. Commands are typed in the Terminal app.
 
-- **DevTools for PDFs**: every page's content stream is parsed into a navigable tree of text blocks, vector paths and images, grouped the way the PDF actually draws them. Switch between friendly labels and the raw content-stream operators.
-- **Two-way selection**: tap an element on the page or tap its row in the tree, and the other side highlights to match, drawn as a clear bordered outline on the canvas.
-- **Edit in place**: move and resize any element, recolor its fill or stroke as hex (the editor names the element's color space), and retype text. When the original font is missing a character, re-encode the line with a fallback font, bundled (Liberation) or taken from your device or imported. Changes are written straight back into the content stream, with full undo and redo.
-- **Surgical delete**: remove exactly the element you picked by rewriting just its slice of the content stream, leaving the rest of the page untouched.
-- **Save a copy, never the original**: your edited PDF is written to a new file through the system file picker, so the source document is left exactly as it was.
-- **Smooth viewing**: pan and pinch-zoom, fit to width or height, a global zoom that carries across pages, and a full-screen mode.
-- **Dockable inspector**: the inspector panel docks to the side in landscape or the bottom in portrait, resizes by dragging, and can be made transparent to see the page through it.
-- **Material You**: Material 3 design with dynamic color on Android 12+, light / dark / system themes and a choice of accent colors.
-- **Private and open**: open source, no accounts, no telemetry. No network access and no storage permission: files are opened and saved through Android's Storage Access Framework, so the app only ever touches the documents you explicitly pick.
+1. **Android Studio** (free, from developer.android.com/studio). It also installs the Android SDK.
+2. **JDK 17** (Java 17). Android Studio's own bundled Java is too new for this project, so use JDK 17.
+   On this machine it is already installed at
+   `~/Library/Java/JavaVirtualMachines/jdk-17.0.20.1+1`.
+   Tell the terminal to use it (do this in every new Terminal window):
 
-## Install
+   ```
+   export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+   ```
 
-| Channel | |
-|---|---|
-| [GitHub Releases](https://github.com/shardulvs/pdfinspector-android/releases/latest) | Signed APK |
+   Check with `java -version`; it should say 17.
 
-## Build from source
+## Open the project
 
-Requires **JDK 17** (the project pins Java 17):
+1. Start Android Studio and choose **Open**.
+2. Pick the `pdf-editor` folder (the one containing this README).
+3. Wait for "Gradle sync" to finish. The first time it downloads things, so it can take a few minutes.
 
-```bash
-git clone https://github.com/shardulvs/pdfinspector-android.git
-cd pdfinspector-android
-JAVA_HOME=/path/to/jdk-17 ./gradlew assembleDebug
+## Run the tests
+
+In Terminal, from the `pdf-editor` folder:
+
+```
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+./gradlew testDebugUnitTest
 ```
 
-Output: `app/build/outputs/apk/debug/app-debug.apk`
+"BUILD SUCCESSFUL" means everything passed. The tests include a "corpus" of real PDFs in
+`app/src/test/resources/fixtures/corpus/`. If you have PDFs from Word, Google Docs or LibreOffice (non-sensitive
+ones only), copy them into that folder: the tests pick them up automatically. See the README in that folder.
+
+## Build the app
+
+```
+./gradlew assembleDebug
+```
+
+The app file (an APK) is created at `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Try it on the emulator
+
+1. Start the virtual phone:
+
+   ```
+   ~/Library/Android/sdk/emulator/emulator -avd Pixel_8_API_36
+   ```
+
+   (Or start `Pixel_8_API_36` from Android Studio's Device Manager.) Wait until the home screen appears.
+2. Install the app on it:
+
+   ```
+   ~/Library/Android/sdk/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+3. Open "PDF Editor" in the emulator's app list.
+
+## The privacy promise, and how it is checked
+
+The app declares no permissions at all, in particular not internet. To verify this after building, run:
+
+```
+scripts/check-no-permissions.sh
+```
+
+It should print `OK: no permissions`. If it ever prints anything else, something has been added that breaks the
+promise.
+
+## Credits
+
+Based on PDF Inspector by Shardul Vikram Singh (MIT License). The full licence is in the `LICENSE` file and in the
+app's About screen (three-dot menu, then About). The app bundles fonts under open licences (Liberation, Carlito,
+Caladea, Gelasio, Latin Modern, URW base 35, Selawik); their licence texts are shown in the same About screen.
+PDF handling uses PdfBox-Android (Apache 2.0).
