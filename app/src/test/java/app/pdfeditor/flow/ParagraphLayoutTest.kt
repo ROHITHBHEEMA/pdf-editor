@@ -84,4 +84,14 @@ class ParagraphLayoutTest {
     @Test fun fontPlanThrowsForUnknownStyle() {
         assertThrows(IllegalArgumentException::class.java) { plan.fontFor(plain.copy(fontResourceName = "Zz")) }
     }
+    @Test fun subsetBuiltInEncodingFontMeasuredFromPlanBytes() {
+        PDDocument.load(PdfFixtures.sampleLetter()).use { d ->
+            val p = DocumentAnalyzer.analyze(d).pages.flatMap { ParagraphDetector.detect(it) }.single { it.text() == "Date: 17 Octobr 2026" }
+            val plan = (FontResolver.plan(d, p.spans, app.pdfeditor.testing.TestFontProvider) as FontPlanResult.Ok).plan
+            val lines = ParagraphLayout.layout(p.spans, plan, p.left, p.right, 0f, p.firstBaseline, p.lineAdvance, p.alignment)
+            val run = p.runNodes.single().run!!
+            assertEquals(1, lines.size)
+            assertEquals(run.endX - run.originX, lines[0].fragments.sumOf { it.width.toDouble() }.toFloat(), 0.05f)
+        }
+    }
 }

@@ -43,8 +43,26 @@ class LaidLine(val fragments: List<PlacedFragment>, val baseline: Float)
 object ParagraphLayout {
     private const val EPS = 0.001f
 
-    fun textWidth(text: String, style: SpanStyle, font: PDFont): Float =
-        font.getStringWidth(text) / 1000f * style.effectiveFontSize * style.horizontalScale + style.charSpacing * text.length
+    /**
+     * Page-space width of [text]. Subset fonts with a built-in encoding reject `getStringWidth`; with a [plan] the
+     * text is then measured from the bytes [FontPlan.encode] produces (the same bytes that will be drawn).
+     */
+    fun textWidth(text: String, style: SpanStyle, font: PDFont, plan: FontPlan? = null): Float {
+        val glyphs = try {
+            font.getStringWidth(text)
+        } catch (e: Exception) {
+            if (plan == null) throw e
+            encodedWidth(plan.encode(style, text), font)
+        }
+        return glyphs / 1000f * style.effectiveFontSize * style.horizontalScale + style.charSpacing * text.length
+    }
+
+    private fun encodedWidth(bytes: ByteArray, font: PDFont): Float {
+        val input = java.io.ByteArrayInputStream(bytes)
+        var w = 0f
+        while (input.available() > 0) w += font.getWidth(font.readCode(input))
+        return w
+    }
 
     private class Ch(val c: Char, val style: SpanStyle, val w: Float)
 
@@ -58,7 +76,7 @@ object ParagraphLayout {
         val all = ArrayList<Ch>()
         val widthCache = HashMap<Pair<SpanStyle, Char>, Float>()
         for (s in spans) for (c in s.text) {
-            val w = if (c == '\n') 0f else widthCache.getOrPut(s.style to c) { textWidth(c.toString(), s.style, plan.fontFor(s.style)) }
+            val w = if (c == '\n') 0f else widthCache.getOrPut(s.style to c) { textWidth(c.toString(), s.style, plan.fontFor(s.style), plan) }
             all += Ch(c, s.style, w)
         }
         if (all.isEmpty()) return emptyList()
@@ -118,7 +136,7 @@ object ParagraphLayout {
             if (groups.isNotEmpty() && groups.last().first == c.style) groups.last().second.append(c.c)
             else groups += c.style to StringBuilder().append(c.c)
         }
-        val widths = groups.map { (st, sb) -> textWidth(sb.toString(), st, plan.fontFor(st)) }
+        val widths = groups.map { (st, sb) -> textWidth(sb.toString(), st, plan.fontFor(st), plan) }
         val visible = widths.sum()
         val start = left + if (idx == 0) indent else 0f
         val avail = right - start
