@@ -9,5 +9,5 @@ Every PDF in this folder is run by `CorpusTest` automatically (no code change ne
 | `pdfbox-justified-2page.pdf` | Generated with PdfBox (`PdfFixtures.letter`, justified, 2+ pages) |
 | `pdfbox-header-footer.pdf` | Generated with PdfBox (`PdfFixtures.withHeaderFooter`, 2 pages with header and footer) |
 
-Still missing: exports from Microsoft Word, Google Docs and LibreOffice. The owner should add a few
+Still missing: exports from Microsoft Word, Google Docs, LibreOffice and LaTeX. The owner should add a few
 (non-sensitive documents only) by copying them into this folder.

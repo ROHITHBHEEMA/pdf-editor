@@ -52,6 +52,7 @@ class CorpusTest {
     }
 
     @Test fun editFirstEditableParagraph() {
+        var applied = 0
         for (f in files) {
             val bytes = f.readBytes()
             val target = PDDocument.load(bytes).use { doc ->
@@ -62,7 +63,7 @@ class CorpusTest {
             open(bytes).use { s ->
                 val outcome = s.apply(EditOp.EditParagraph(target.id, target.text() + " Added sentence for testing."), acceptWarnings = true)
                 when (outcome) {
-                    is EditOutcome.Applied -> {}
+                    is EditOutcome.Applied -> applied++
                     is EditOutcome.Rejected ->
                         assertTrue("${f.name}: unexpected ${outcome.reason}", outcome.reason == RejectReason.NO_ROOM || outcome.reason == RejectReason.NON_LATIN)
                     else -> fail("${f.name}: unexpected outcome $outcome")
@@ -72,5 +73,6 @@ class CorpusTest {
                 PDDocument.load(out).use { assertTrue(it.numberOfPages >= 1) }
             }
         }
+        assertTrue("no corpus file accepted an edit", applied >= 1)
     }
 }
